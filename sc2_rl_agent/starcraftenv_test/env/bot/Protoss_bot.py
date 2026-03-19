@@ -2141,7 +2141,7 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
 
     # 如果目录不存在，创建它
     if not os.path.exists(replay_folder):
-        os.makedirs(replay_folder)
+        os.makedirs(replay_folder, exist_ok=True)
 
     map = map_name
 
@@ -2180,7 +2180,7 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
 
     # 如果目录不存在，创建它
     if not os.path.exists(replay_folder):
-        os.makedirs(replay_folder)
+        os.makedirs(replay_folder, exist_ok=True)
 
     map = map_name
     temp_replay_path = f'{replay_folder}/{args.current_time}_{map}_player_race_PROTOSS_VS_RULE_AI_{opposite_bot}_{opposite_race}_process_{process_id}_temp.SC2Replay'
@@ -2216,7 +2216,7 @@ def protoss_agent_vs_human(transaction, lock, map_name, isReadyForNextStep, game
 
     # 如果目录不存在，创建它
     if not os.path.exists(replay_folder):
-        os.makedirs(replay_folder)
+        os.makedirs(replay_folder, exist_ok=True)
 
     map = map_name
 

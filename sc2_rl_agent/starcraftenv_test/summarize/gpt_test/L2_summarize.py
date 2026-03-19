@@ -158,6 +158,22 @@ class L2_summary:
             for chunk in chunks:
                 # 根据模板填充内容
                 chunks_str = "\n".join(f"chunk{i}: {item}" for i, item in enumerate(chunk))
-                L2_summary = self.chatbot.query(chunks_str)
+                format_reminder = """\n\nYou MUST end your response with EXACTLY this format (no variations):
+
+Decisions:
+0: <EXACT ACTION NAME FROM DICTIONARY>
+1: <EXACT ACTION NAME FROM DICTIONARY>
+2: <EXACT ACTION NAME FROM DICTIONARY>
+3: <EXACT ACTION NAME FROM DICTIONARY>
+4: <EXACT ACTION NAME FROM DICTIONARY>
+
+Use ONLY action names that appear exactly in the action dictionary. Example:
+Decisions:
+0: <BUILD PYLON>
+1: <TRAIN PROBE>
+2: <BUILD ASSIMILATOR>
+3: <BUILD GATEWAY>
+4: <CHRONOBOOST NEXUS>"""
+                L2_summary = self.chatbot.query(chunks_str + format_reminder)
                 L2_summaries.append(L2_summary)
         return L2_summaries

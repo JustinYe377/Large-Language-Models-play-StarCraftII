@@ -108,7 +108,8 @@ class ChatBot_SingleTurn:
                 output = openai.ChatCompletion.create(
                     model=self.model_name,
                     messages=self.messages,
-                    temperature=self.temperature
+                    temperature=self.temperature,
+                    request_timeout=1800
                 )
                 answer = output["choices"][0]["message"]["content"]
                 return answer

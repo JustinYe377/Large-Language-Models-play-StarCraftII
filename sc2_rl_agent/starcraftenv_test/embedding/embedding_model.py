@@ -58,7 +58,7 @@ class LocalEmbedding(BaseEmbeddingModel):
             self.model = model
         else:
             logger.info(f"模型{model_name}的权重已存在，加载本地权重... 路径：{self.model_path_hf}")
-            self.model = SentenceTransformer(self.model_path_hf)
+            self.model = SentenceTransformer(str(self.model_path_hf))
 
         # 获取并检查向量宽度
         vector_width_from_weights: int = self.model.get_sentence_embedding_dimension()  # e.g: 768

@@ -20,7 +20,7 @@ class ChatGPTAgent:
                  raw_observation="raw_observation.json", L1_observation_file_name="L1_observations.json",
                  commander_file_name='commander.json',
                  action_interval=10, chunk_window=5, action_window=10, action_mix_rate=0.5,
-                 last_k=5, prompt_type='v4'):
+                 last_k=5, prompt_type='v3'):
         self.args = args
         self.model_name = model_name
         self.api_key = api_key
@@ -66,8 +66,7 @@ class ChatGPTAgent:
             os.makedirs(self.game_folder)
 
     def init_action_db(self):
-        relative_path_parts = ["..", "..", "..", "utils", "actionvdb", "action_vdb"]
-        action_vdb_path = os.path.join(*relative_path_parts)
+        action_vdb_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils", "actionvdb", "action_vdb")
         self.action_db = ActionDBManager(db_path=action_vdb_path)
         if self.args.player_race == "Protoss":
             self.action_db.initialize_collection("protoss_actions")

@@ -67,8 +67,9 @@ class Text_Starcraftenv_Build_In_Bot(gym.Env):
         self.map_name = self.map_pool[self.map_idx]
         self.opposite_race = args.opposite_race
         self.difficulty = args.difficulty
-        self.lock = multiprocessing.Manager().Lock()
-        self.transaction = multiprocessing.Manager().dict()
+        self._manager = multiprocessing.Manager()
+        self.lock = self._manager.Lock()
+        self.transaction = self._manager.dict()
         self.transaction.update(
             {'information': [], 'reward': 0, 'action': None,
              'done': False, 'result': None, 'iter': 0, 'command': None, "output_command_flag": False,
@@ -324,8 +325,9 @@ class Text_Starcraftenv_VS_Human(gym.Env):
         self.map_idx = args.map_idx
         self.player_race = args.player_race
         self.map_name = self.map_pool[self.map_idx]
-        self.lock = multiprocessing.Manager().Lock()
-        self.transaction = multiprocessing.Manager().dict()
+        self._manager = multiprocessing.Manager()
+        self.lock = self._manager.Lock()
+        self.transaction = self._manager.dict()
         self.transaction.update(
             {'information': [], 'reward': 0, 'action': None,
              'done': False, 'result': None, 'iter': 0, 'command': None, "output_command_flag": False,
@@ -578,8 +580,9 @@ class Text_Starcraftenv_Rule_Bot(gym.Env):
         self.map_name = self.map_pool[self.map_idx]
         self.opposite_race = args.opposite_race
         self.opposite_bot = args.opposite_bot
-        self.lock = multiprocessing.Manager().Lock()
-        self.transaction = multiprocessing.Manager().dict()
+        self._manager = multiprocessing.Manager()
+        self.lock = self._manager.Lock()
+        self.transaction = self._manager.dict()
         self.transaction.update(
             {'information': [], 'reward': 0, 'action': None,
              'done': False, 'result': None, 'iter': 0, 'command': None, "output_command_flag": False,

@@ -56,7 +56,7 @@ class RandomAgent:
 
         # 如果目录不存在，创建它
         if not os.path.exists(self.game_folder):
-            os.makedirs(self.game_folder)
+            os.makedirs(self.game_folder, exist_ok=True)
 
     def _save_data_to_file(self, data, filename):
         """

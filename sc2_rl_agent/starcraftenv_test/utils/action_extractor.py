@@ -3,7 +3,7 @@ import re
 
 def extract_actions_from_text(text):
     # 正则表达式匹配模式：搜索 "Decisions" 之后的内容
-    action_pattern = r"(?<=Decisions:)[\s\S]*"
+    action_pattern = r"(?:#+\s*|\*+)?Decisions:?\**[\s\S]*"
 
     # 使用正则表达式从文本中找到所有匹配的决策部分
     decisions_matches = re.search(action_pattern, text)
@@ -15,7 +15,7 @@ def extract_actions_from_text(text):
     decisions_text = decisions_matches.group()
 
     # 使用另一个正则表达式从决策文本中提取实际的动作
-    individual_actions_pattern = r"\d+: <?([^>\n]+)>?"
+    individual_actions_pattern = r"\d+[.:][^\S\n]*[`*]*<?([A-Z][A-Z\s\-]+?)>?[`*]*(?:\s*[-*(\n]|$)"
     actions = re.findall(individual_actions_pattern, decisions_text)
 
     return actions

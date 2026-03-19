@@ -8,7 +8,7 @@ from sc2_rl_agent.starcraftenv_test.env.starcraft_env import StarCraftEnvSelecto
 from sc2_rl_agent.starcraftenv_test.agent.chatgpt_agent import ChatGPTAgent
 from sc2_rl_agent.starcraftenv_test.agent.random_agent import RandomAgent
 from sc2_rl_agent.starcraftenv_test.agent.real_time_agent import RealTimeAgent
-from sc2_rl_agent.starcraftenv_test.agent.llama2_agent import Llama2Agent
+from sc2_rl_agent.starcraftenv_test.agent.llama2_agent import Llama2_Agent as Llama2Agent
 from sc2_rl_agent.starcraftenv_test.prompt.prompt import *
 
 """

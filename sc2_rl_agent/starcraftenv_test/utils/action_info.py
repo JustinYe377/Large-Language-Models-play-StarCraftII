@@ -5,8 +5,8 @@ class ActionDescriptions:
         self.action_descriptions = {}  # 初始化为空字典
         self.action_dict_len = 0  # 初始化为0
         self.action_descriptions = self.init_actions_by_race(race)
-        self.action_dict_len = len(self.action_descriptions)
         self._flatten_actions()
+        self.action_dict_len = len(self.flattened_actions)
         self.empty_action_id = self.action_dict_len - 1  # 空动作的索引
 
     def init_actions_by_race(self, race):
