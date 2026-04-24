@@ -62,18 +62,39 @@ if __name__ == '__main__':
                                                                      '0-100 means multiprocess id.')
     parser.add_argument('--current_time', type=str, default=datetime.now().strftime('%Y%m%d_%H%M%S'),
                         help='Current time. Default is current system time.')
-    parser.add_argument('--agent_type', type=str, default="gemini",
-                        help='Agent type. Use "random" or "gemini" or "prompt1" or "gpt" or"glm-4" or "claude2","qwen_7b","APU"')
+    parser.add_argument('--agent_type', type=str, default="deepseek",
+                        help='Agent type. Use "random","chatgpt","deepseek","prompt1","gemini","claude2","qwen_7b","llama2_7b","APU"')
 
-    parser.add_argument('--LLM_model_name', type=str, default="gemini-pro",help="gpt-3.5-turbo-16k,gemini-pro,glm-4")
+    parser.add_argument('--LLM_model_name', type=str, default="deepseek-chat",
+                        help="e.g. deepseek-chat, deepseek-reasoner, gpt-3.5-turbo-16k, gemini-pro, glm-4")
     parser.add_argument('--LLM_temperature', type=float, default=0.1)
 
     parser.add_argument('--LLM_api_key', type=str, default="your-key")
-    parser.add_argument('--LLM_api_base', type=str, default="your-api-base")
+    parser.add_argument('--LLM_api_base', type=str, default="https://api.deepseek.com/v1")
     parser.add_argument('--num_processes', type=int, default=1, help='Number of processes to spawn.')
-    parser.add_argument('--real_time', type=bool, default=False, help='True or False')
+    # NOTE: argparse 'type=bool' is broken — 'bool("False")' returns True.
+    # Use mutually-exclusive store_true / store_false flags instead.
+    # Default is real_time=False (non-realtime, as fast as the engine can step).
+    real_time_group = parser.add_mutually_exclusive_group()
+    real_time_group.add_argument('--real_time', dest='real_time', action='store_true',
+                                 help='Run SC2 in real-time mode (slow, human-watchable).')
+    real_time_group.add_argument('--no_real_time', dest='real_time', action='store_false',
+                                 help='Run SC2 in non-realtime / fast-forward mode (default).')
+    parser.set_defaults(real_time=False)
+    parser.add_argument('--replay_folder', type=str, default='./replays',
+                        help='Folder where .SC2Replay files are written. Created if missing.')
     parser.add_argument('--ai_build', type=str, default=AI_BUILD_LEVELS[0], help='ai build level')
     original_args = parser.parse_args()
+
+    # Make sure replay folder exists so workers can write into it.
+    import os
+    os.makedirs(original_args.replay_folder, exist_ok=True)
+    print(f"[multiprocess_test] agent_type={original_args.agent_type} "
+          f"model={original_args.LLM_model_name} "
+          f"api_base={original_args.LLM_api_base} "
+          f"real_time={original_args.real_time} "
+          f"num_processes={original_args.num_processes} "
+          f"replay_folder={original_args.replay_folder}")
 
 
     processes = []
@@ -83,7 +104,11 @@ if __name__ == '__main__':
         # 根据 agent_type 选择对应的 worker
         if args_copy.agent_type == 'random':
             target_worker = random_worker
-        elif args_copy.agent_type == 'chatgpt':
+        elif args_copy.agent_type in ('chatgpt', 'gpt', 'deepseek'):
+            # 'gpt' is the alias used by test_the_env.py; 'deepseek' is a convenience alias.
+            # All three route to chatgpt_worker. DeepSeek is OpenAI-compatible, so just
+            # pass --LLM_api_base=https://api.deepseek.com/v1 and --LLM_model_name=deepseek-chat
+            # (or deepseek-reasoner).
             target_worker = chatgpt_worker
         elif args_copy.agent_type =='prompt1':
             target_worker=prompt1_worker
