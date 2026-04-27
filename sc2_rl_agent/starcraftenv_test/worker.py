@@ -10,6 +10,7 @@ from sc2_rl_agent.starcraftenv_test.agent.claude2_agent import Claude2Agent
 from sc2_rl_agent.starcraftenv_test.agent.qwen_7b_agent import Qwen7bAgent
 from sc2_rl_agent.starcraftenv_test.agent.llama2_agent import Llama2_Agent
 from sc2_rl_agent.starcraftenv_test.agent.APU_agent import APUAgent
+from sc2_rl_agent.starcraftenv_test.commander import Commander
 
 def agent_test(agent, env, args=None):
     """
