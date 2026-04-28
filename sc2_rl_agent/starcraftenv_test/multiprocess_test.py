@@ -84,6 +84,10 @@ if __name__ == '__main__':
     parser.add_argument('--replay_folder', type=str, default='./replays',
                         help='Folder where .SC2Replay files are written. Created if missing.')
     parser.add_argument('--ai_build', type=str, default=AI_BUILD_LEVELS[0], help='ai build level')
+    parser.add_argument('--strategy', type=str, default='macro',
+                        choices=['macro', 'rush'],
+                        help="Commander strategy. 'macro' = standard nexus-first into "
+                             "tech (default). 'rush' = 4-Gate Stalker all-in.")
     original_args = parser.parse_args()
 
     # Make sure replay folder exists so workers can write into it.

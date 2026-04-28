@@ -52,7 +52,7 @@ def initialize_and_test_agent(args):
     print("action_dict", action_dict)
 
     # 生成提示
-    sc2prompt = StarCraftIIPrompt_V4(race=args.player_race, K="5", action_dict=action_dict)
+    sc2prompt = StarCraftIIPrompt_V2(race=args.player_race, K="5", action_dict=action_dict,game_style="aggressive")
     system_prompt, example_input_prompt, example_output_prompt = sc2prompt.generate_prompts()
     example_prompt = [example_input_prompt.format(K_1=4), example_output_prompt]
 
@@ -62,7 +62,9 @@ def initialize_and_test_agent(args):
                             system_prompt, example_prompt, args.LLM_temperature,
                             args, action_description)
         agent_test(agent, env)
-    elif args.agent_type == 'gpt':
+    elif args.agent_type in ('gpt', 'chatgpt', 'deepseek'):
+        # All three aliases route to ChatGPTAgent. DeepSeek is OpenAI-compatible,
+        # so the same agent class works as long as --LLM_api_base points at it.
         agent = ChatGPTAgent(args.LLM_model_name, args.LLM_api_key, args.LLM_api_base,
                              system_prompt, example_prompt, args.LLM_temperature,
                              args, action_description)
@@ -152,19 +154,37 @@ if __name__ == '__main__':
                                                                      '0-100 means multiprocess id.')
     parser.add_argument('--current_time', type=str, default=datetime.now().strftime('%Y%m%d_%H%M%S'),
                         help='Current time. Default is current system time.')
-    parser.add_argument('--agent_type', type=str, default="llama2",
-                        help='Agent type. Use "random" or "llama2" or "glm2" or "chatgpt"')
+    parser.add_argument('--agent_type', type=str, default="gpt",
+                        help='Agent type. Use "random","gpt","chatgpt","deepseek","llama2","glm2"')
 
-    parser.add_argument('--LLM_model_name', type=str, default="gpt-3.5-turbo-16k")
-    parser.add_argument('--LLM_temperature', type=float, default=0)
+    parser.add_argument('--LLM_model_name', type=str, default="deepseek-v4-flash",
+                        help="e.g. deepseek-v4-flash, deepseek-chat, gpt-3.5-turbo-16k")
+    parser.add_argument('--LLM_temperature', type=float, default=0.3)
 
     parser.add_argument('--LLM_api_key', type=str, default="Your-api-key")
-    parser.add_argument('--LLM_api_base', type=str, default="Your-api-base")
-    parser.add_argument('--real_time', type=bool, default=False, help='True or False')
+    parser.add_argument('--LLM_api_base', type=str, default="https://api.deepseek.com/v1")
+
+    # NOTE: argparse 'type=bool' is broken — bool("False") is True. Use mutually-
+    # exclusive store_true / store_false flags instead. Default is real_time=False.
+    real_time_group = parser.add_mutually_exclusive_group()
+    real_time_group.add_argument('--real_time', dest='real_time', action='store_true',
+                                 help='Run SC2 in real-time mode (slow, human-watchable).')
+    real_time_group.add_argument('--no_real_time', dest='real_time', action='store_false',
+                                 help='Run SC2 in non-realtime / fast-forward mode (default).')
+    parser.set_defaults(real_time=False)
+
+    # Commander strategy: 'macro' (default) or 'rush' (4-Gate Stalker all-in).
+    parser.add_argument('--strategy', type=str, default='macro',
+                        choices=['macro', 'rush'],
+                        help="Commander strategy. 'macro' = standard nexus-first into "
+                             "tech (default). 'rush' = 4-Gate Stalker all-in.")
+
     args = parser.parse_args()
-    if args.real_time == True:
+
+    print(f"[test_the_env] agent_type={args.agent_type} model={args.LLM_model_name} "
+          f"strategy={args.strategy} real_time={args.real_time} difficulty={args.difficulty}")
+
+    if args.real_time:
         real_time_test(args)
-    elif args.real_time == False:
-        initialize_and_test_agent(args)
     else:
-        raise ValueError(f"Unknown real_time type: {args.real_time}")
+        initialize_and_test_agent(args)

@@ -341,6 +341,10 @@ class Commander:
     (system_prompt, user_prompt) and returns a string response. Keeping it
     as a callable means this class has zero dependency on openai/deepseek/etc
     and is trivial to unit-test with a mock.
+
+    The strategy used (macro vs rush) is selected by passing a different
+    `system_prompt` and `saving_allowlist`. Defaults are the macro values
+    so existing call sites keep working.
     """
     llm_call: Callable[[str, str], str]
     tick_interval_game_seconds: float = 60.0
@@ -354,6 +358,11 @@ class Commander:
     # Actions the Commander is NEVER allowed to forbid, even if the LLM
     # tries. Hard guard against pathological directives.
     never_forbid: List[str] = field(default_factory=list)
+
+    # Strategy-specific overrides. Default to macro-mode constants defined
+    # at module scope. Pass alternates for rush mode etc.
+    system_prompt: Optional[str] = None       # falls back to COMMANDER_SYSTEM_PROMPT
+    saving_allowlist: Optional[List[str]] = None  # falls back to SAVING_FOR_ALLOWLIST
 
     def maybe_tick(self, game_seconds: float, game_state_summary: str) -> bool:
         """
@@ -370,22 +379,43 @@ class Commander:
         self._tick(game_seconds, game_state_summary)
 
     def _tick(self, game_seconds: float, game_state_summary: str) -> None:
+        """
+        Run the commander LLM once. On the first failure (LLM error OR JSON
+        parse error), retry with a stricter user prompt that emphasizes JSON
+        format. After that, fall through and keep prior state.
+        """
         prev = self.state
-        try:
-            response = self.llm_call(
-                COMMANDER_SYSTEM_PROMPT,
-                build_commander_user_prompt(game_state_summary, prev),
-            )
-            new_state = self._parse_response(response, game_seconds)
-            new_state.tick_count = prev.tick_count + 1
-            new_state.raw_last_response = response
-            self.state = new_state
-        except Exception as e:
-            # Don't crash the game over a commander failure. Keep prior state,
-            # bump the tick counter, but log the error.
-            print(f"[Commander] LLM call failed at t={game_seconds:.0f}s: {e}")
-            self.state.last_tick_game_seconds = game_seconds
-            self.state.tick_count = prev.tick_count + 1
+        attempt_errors: List[str] = []
+
+        for attempt in range(2):
+            try:
+                user_prompt = build_commander_user_prompt(game_state_summary, prev)
+                if attempt > 0:
+                    # Second attempt: hammer the JSON format requirement.
+                    user_prompt += (
+                        "\n\nIMPORTANT: Your previous response was not valid JSON. "
+                        "Output a SINGLE JSON object with no surrounding prose, no "
+                        "markdown code fences, no explanations. Use only ASCII "
+                        "characters. Keep the 'reasoning' field to a single line "
+                        "with no newlines or unescaped quotes."
+                    )
+                response = self.llm_call(
+                    self.system_prompt or COMMANDER_SYSTEM_PROMPT, user_prompt,
+                )
+                new_state = self._parse_response(response, game_seconds)
+                new_state.tick_count = prev.tick_count + 1
+                new_state.raw_last_response = response
+                self.state = new_state
+                return  # success
+            except Exception as e:
+                attempt_errors.append(f"attempt {attempt + 1}: {type(e).__name__}: {e}")
+                continue
+
+        # Both attempts failed. Don't crash the game; keep prior state and log.
+        print(f"[Commander] all attempts failed at t={game_seconds:.0f}s: "
+              f"{'; '.join(attempt_errors)}")
+        self.state.last_tick_game_seconds = game_seconds
+        self.state.tick_count = prev.tick_count + 1
 
     def _parse_response(self, raw: str, game_seconds: float) -> CommanderState:
         """Robustly extract JSON. The LLM occasionally wraps it in fences or prose."""
@@ -431,23 +461,25 @@ class Commander:
             forbidden = [a for a in forbidden if a not in self.never_forbid]
 
         # ---- allowlist mode ----
-        # When use_allowlist is true, populate allowed_actions with the canonical
-        # SAVING_FOR_ALLOWLIST. We do NOT let the LLM define an arbitrary
-        # allowlist — that's too easy to mess up and turn into a softer lock.
-        # Instead, allowlist mode is binary: on or off, with a fixed safe set.
+        # When use_allowlist is true, populate allowed_actions with the
+        # configured allowlist for this Commander (macro or rush). We do
+        # NOT let the LLM define an arbitrary allowlist — that's too easy
+        # to mess up and turn into a softer lock. Allowlist mode is binary:
+        # on or off, with a fixed safe set selected by the strategy.
         use_allowlist = bool(data.get("use_allowlist", False))
         allowed_actions: List[str] = []
         if use_allowlist:
+            base_allowlist = self.saving_allowlist or SAVING_FOR_ALLOWLIST
             # Filter against known_actions so we never produce allowlist entries
             # the bot doesn't understand.
             if self.known_actions:
-                allowed_actions = [a for a in SAVING_FOR_ALLOWLIST if a in self.known_actions]
+                allowed_actions = [a for a in base_allowlist if a in self.known_actions]
             else:
-                allowed_actions = list(SAVING_FOR_ALLOWLIST)
+                allowed_actions = list(base_allowlist)
 
         # ---- tech_path commitment (sticky, server-enforced) ----
         proposed_path = str(data.get("tech_path", "none")).strip().lower()
-        if proposed_path not in ("none", "robotics", "twilight", "stargate"):
+        if proposed_path not in ("none", "gateway", "robotics", "twilight", "stargate"):
             proposed_path = "none"
 
         if prev.committed_tech_path != "none":
@@ -676,11 +708,39 @@ def _self_test():
         "drift to stargate should be ignored — once committed, robotics is sticky"
     print("\nTest 9: tech drift attempt rejected (stays robotics)")
 
+    # ---- Test 10: rush-mode Commander uses a different allowlist ----
+    # When constructed with a custom saving_allowlist (rush mode), the
+    # allowlist mode should populate from that list, not the macro one.
+    from rush_commander_prompt import RUSH_ALLOWLIST, RUSH_COMMANDER_SYSTEM_PROMPT
+    rush_response = json.dumps({
+        "intent": "4-Gate rush, saving for Cyber Core.",
+        "saving_for": {"purpose": "cybernetics core", "minerals": 150, "gas": 0},
+        "use_allowlist": True,
+        "tech_path": "gateway",
+        "forbidden_actions": [],
+        "rush_phase": "building",
+        "reasoning": "Phase 1 of 4-gate.",
+    })
+    rush_cmd = Commander(
+        llm_call=_make_mock_llm(rush_response),
+        known_actions=PROTOSS_ACTION_VOCAB,
+        never_forbid=list(PROTOSS_NEVER_FORBID),
+        system_prompt=RUSH_COMMANDER_SYSTEM_PROMPT,
+        saving_allowlist=RUSH_ALLOWLIST,
+    )
+    rush_cmd.maybe_tick(0.0, "...")
+    # Rush allowlist permits stalkers but NOT nexus expansion.
+    assert rush_cmd.is_allowed("TRAIN STALKER"), "rush mode must allow stalkers"
+    assert rush_cmd.is_allowed("BUILD GATEWAY"), "rush mode must allow gateways"
+    assert not rush_cmd.is_allowed("BUILD NEXUS"), "rush mode forbids expansion"
+    assert not rush_cmd.is_allowed("BUILD FORGE"), "rush mode forbids forge"
+    assert not rush_cmd.is_allowed("BUILD ROBOTICSFACILITY"), "rush mode forbids robo"
+    assert not rush_cmd.is_allowed("TRAIN ZEALOT"), "rush mode is stalker-only"
+    # Tech path "gateway" is accepted (not in the macro tech list, so no actions blocked by it).
+    assert rush_cmd.state.committed_tech_path == "gateway"
+    print("\nTest 10: rush mode allowlist overrides macro defaults (stalker yes, nexus no)")
+
     print("\nAll self-tests passed.")
-
-
-# ---------------------------------------------------------------------------
-# Example integration sketch — adapt this into your worker
 # ---------------------------------------------------------------------------
 
 EXAMPLE_INTEGRATION = '''
