@@ -83,9 +83,24 @@ class ChatBot_SingleTurn:
         self.system_prompt = system_prompt
         self.example = example_prompt
 
-        openai.api_key = api_key
-        openai.api_base = api_base
+        # openai>=1 client. max_retries=0 because query() does its own
+        # retry/backoff loop; the SDK's built-in retries would change timing.
+        from openai import OpenAI
+        self.client = OpenAI(api_key=api_key, base_url=api_base, timeout=1800, max_retries=0)
         self.messages = []
+        # Optional, set by the agent: telemetry LLMMeter and reasoning effort
+        # (None = do not send the parameter, i.e. the pre-telemetry request).
+        self.meter = None
+        self.reasoning_effort = None
+
+    def _meter(self, call, method, *args):
+        """Telemetry must never affect the query, so swallow its errors."""
+        if call is None:
+            return
+        try:
+            getattr(call, method)(*args)
+        except Exception as e:
+            print(f"[telemetry] LLM meter error ignored: {e}")
 
     def query(self, user_input, max_retries=5):
         """
@@ -102,20 +117,29 @@ class ChatBot_SingleTurn:
         ]
         self.messages.append({"role": "user", "content": user_input})
 
+        request = dict(model=self.model_name, messages=self.messages, temperature=self.temperature)
+        if self.reasoning_effort is not None:
+            request["extra_body"] = {"reasoning_effort": self.reasoning_effort}
+
+        call = None
+        if self.meter is not None:
+            try:
+                call = self.meter.begin(list(self.messages))
+            except Exception as e:
+                print(f"[telemetry] LLM meter error ignored: {e}")
+
         # 尝试发送请求并获取回复
         for retries in range(max_retries):
+            t0 = time.perf_counter()
             try:
-                output = openai.ChatCompletion.create(
-                    model=self.model_name,
-                    messages=self.messages,
-                    temperature=self.temperature,
-                    request_timeout=1800
-                )
-                answer = output["choices"][0]["message"]["content"]
+                output = self.client.chat.completions.create(**request)
+                answer = output.choices[0].message.content
+                self._meter(call, "success", retries, t0, output, answer)
                 return answer
             except Exception as e:
                 # 输出错误信息
                 print(f"Error when calling the OpenAI API: {e}")
+                self._meter(call, "error", retries, t0, e, retries >= max_retries - 1)
 
                 # 如果达到最大尝试次数，返回一个特定的回复
                 if retries >= max_retries - 1:

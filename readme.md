@@ -171,7 +171,7 @@ Place the maps in `StarCraft II/Maps/` (create the `Maps` folder if it doesn't e
 - **Python:** 3.10
 - **CUDA:** 12.1
 - **PyTorch:** 2.1.0
-- **OpenAI Python SDK:** 0.27.9 — **important**, versions ≥0.28 break the API call signatures used in this codebase.
+- **OpenAI Python SDK:** ≥1.0 for the main `test_the_env.py` path (`LLM/gpt_test.py::ChatBot_SingleTurn` uses the `OpenAI` client). Some older standalone scripts under `LLM/` (`ChatBot_MultiTurn`, `API_caller.py`, `test_api.py`) still use the pre-1.0 `openai.ChatCompletion` API and are not used by the main path.
 
 Install all packages:
 
@@ -187,7 +187,7 @@ pip install -r requirements.txt
 
 ### Using DeepSeek instead of OpenAI (this fork's default)
 
-This fork uses DeepSeek-V4-Flash by default. Set the API base to `https://api.deepseek.com/v1` and pass your DeepSeek key. The OpenAI Python SDK at version 0.27.9 talks to DeepSeek's OpenAI-compatible endpoint without modification:
+This fork uses DeepSeek-V4-Flash by default. Set the API base to `https://api.deepseek.com/v1` and pass your DeepSeek key. The OpenAI Python SDK (≥1.0) talks to DeepSeek's OpenAI-compatible endpoint without modification:
 
 ```bash
 python -m sc2_rl_agent.starcraftenv_test.test_the_env \
@@ -250,6 +250,76 @@ AI_BUILD_LEVELS = ['randombuild', 'rush', 'timing', 'power', 'macro', 'air']
 ### Multi-process
 
 `multiprocess_test.py` runs N games in parallel. Set `--num_processes` to the number of parallel SC2 instances. ~3–4 parallel games is realistic on a single home GPU; further parallelism is bottlenecked by SC2 client memory, not the LLM. Other parameters are the same as single process.
+
+---
+
+## Telemetry
+
+Every `test_the_env.py` game run with `--agent_type gpt|chatgpt|deepseek` is recorded for comparing experiments. This is measurement only: prompts, decision frequency, the extractor, the resource filter and `mix_actions` are unchanged.
+
+**Local JSONL is the source of truth; wandb is only a sink.** If wandb is missing, not logged in or offline, the game still runs to the end and every local file is still written. Each game folder `log/chatgpt_log/game_<time>_<pid>/` keeps the old files (`action_executed.json`, …, same format) and adds:
+
+| File | One line per | Contents |
+|---|---|---|
+| `llm_calls.jsonl` | HTTP attempt (retries included) | tokens, DeepSeek cache hit/miss, latency, `model_returned`, error, full prompt and response |
+| `decision_ticks.jsonl` | L2 decision | parse tier, parsed → filtered → queued counts, slot sources |
+| `slots.jsonl` | dequeued action slot | `slot_source`, executed name, failure reason/category |
+| `observations.jsonl` | env step | macro metrics (minerals, supply, bases, army entropy, …) |
+| `events.jsonl` | run event | run start/end and config, warnings (e.g. `model_changed`, `wandb_disabled`) |
+| `game_summary.json` | game | all whole-game metrics below |
+
+The replay (`*.SC2Replay`) is now saved in the same folder; before, `gpt`/`deepseek` replays ended up in `random_log/`.
+
+### wandb setup and modes
+
+```bash
+wandb login                     # once; stored in ~/.netrc
+python -m sc2_rl_agent.starcraftenv_test.test_the_env --agent_type deepseek --difficulty VeryEasy \
+    --wandb_mode offline --exp_group smoke --LLM_api_key sk-...
+wandb sync wandb/offline-run-*  # upload offline runs later
+```
+
+| `--wandb_mode` (or `WANDB_MODE`) | Behaviour |
+|---|---|
+| `offline` (default) | writes `./wandb/offline-run-*` locally; upload with `wandb sync` |
+| `online` | streams to project `textsc2` |
+| `disabled` | no wandb at all; JSONL only |
+
+The CLI flag wins over `WANDB_MODE`. Other flags: `--exp_group` (wandb group, default `adhoc`), `--LLM_reasoning_effort` (sent via `extra_body` only when set), and `--price_in_hit/--price_in_miss/--price_out` (USD per 1M tokens, used for `est_cost_usd`; 0 = no estimate). Runs are named `{difficulty}-{map}-{model}-{time}-p{pid}` and tagged with agent type, difficulty, opponent race, prompt type and `phase0`. The API key is excluded from the config and scrubbed from every file before upload. wandb is only initialised in the main process; the SC2 bot subprocess never imports it. Ctrl+C still writes the summary and uploads the artifact with `result=aborted` (wandb shows such runs as *failed*, since it has no "aborted" state). `multiprocess_test.py` workers write JSONL but only use wandb when `WANDB_MODE` is set.
+
+### Metric definitions
+
+Each L2 decision asks the LLM for K=5 actions. The agent then queues a window of 10 slots, of which at most 5 are real actions. Every slot is tagged with a `slot_source`:
+
+- `llm`: an action the LLM proposed that survived parsing and the resource filter
+- `padding`: EMPTY inserted by `mix_actions` between real actions
+- `filter_drop`: an LLM proposal the resource filter replaced with EMPTY
+- `parse_empty`: EMPTY because the extractor found nothing
+- `queue_empty`: EMPTY because the queue ran dry
+
+**Only `llm` slots count as decisions. Padding never enters a denominator.** The old analyzer counted padding as "LLM silent", which is why the 6822-step table above overstates silence. Rerun it through the backfill tool (below) for corrected numbers.
+
+| Metric | Definition |
+|---|---|
+| `parse_rate` | parsed actions / K requested |
+| `admit_rate` | actions left after the resource filter / parsed |
+| `queue_rate` | `llm` slots queued / admitted (the rest were cut off by the window, see `truncated_actions`) |
+| `exec_success` | `llm` slots that did not fail / `llm` slots executed. A slot fails only if the next step's `action_failures` names *that* action, because failures from scripted `defend()` share the same list. |
+| `conversion` | successful `llm` slots / (K × number of ticks) |
+| `padding_share` | non-`llm` slots / all slots |
+
+The wandb x-axis is `game_time_s` (`game_loop / 22.4`). `game/*` is logged every 5 game seconds, and `funnel/*` and `llm/*` once per decision (rolling over the last 10 decisions). The summary also has token totals, `cache_hit_ratio`, latency p50/p95, `wall_clock_share_waiting_llm`, `parse_tier_*`, `fail_cat_*`, `action_count_*`, peak supply/workers/bases, `time_to_first_attack_s`, `supply_blocked_s`, `army_comp_entropy_mean` (how evenly the army is spread across unit types), `model_resolved` (the model the API actually returned) and `scripted_attack_count`. That last one counts the steps where the hard-coded "12:00 and supply ≥ 100 → attack" rule fired, so rule-driven attacks can be told apart from the LLM's `MULTI-ATTACK`.
+
+### Backfilling old games
+
+```bash
+python -m sc2_rl_agent.starcraftenv_test.telemetry.backfill \
+    --log_root sc2_rl_agent/starcraftenv_test/log/chatgpt_log --exp_group legacy --wandb_mode online
+```
+
+This rebuilds slot sources for old game folders by replaying the agent's queue: the same tick schedule and `mix_actions` placement, the extractor re-run on `commander.json`, and filter drops from `resource_rejections.json`. Results go to `<game>/backfill/` and the originals are not modified. Old games have no token or latency data, and their config is marked `backfilled=true, padding_inferred=true`. Each game prints `backfill_inconsistent_slots`, the number of slots where the rebuilt queue disagrees with what the env actually executed.
+
+Tests (no SC2 or API needed): `python -m pytest sc2_rl_agent/starcraftenv_test/tests/telemetry`.
 
 ---
 

@@ -176,7 +176,7 @@ def extract_actions_from_text(text):
     return legacy if legacy is not None else []
 
 
-def extract_actions_from_command(command, action_extractor, empty_idx, action_db_manager):
+def extract_actions_from_command(command, action_extractor, empty_idx, action_db_manager, info=None):
     """
     Extract a list of valid action IDs and names from the actor's free-text
     command, using a four-tier strategy:
@@ -188,7 +188,13 @@ def extract_actions_from_command(command, action_extractor, empty_idx, action_db
 
     Returns (action_ids, action_names) like the original interface.
     Returns ([empty_idx], ["EMPTY ACTION"]) if nothing parseable was found.
+
+    If `info` is a dict, info['parse_tier'] is set to the tier that produced
+    the result: structured | id_based | legacy | vectordb | none. The return
+    value is unaffected.
     """
+    if info is None:
+        info = {}
     if isinstance(command, list):
         command = " ".join(command)
 
@@ -197,6 +203,7 @@ def extract_actions_from_command(command, action_extractor, empty_idx, action_db
     if ids:
         valid_ids, valid_names = _resolve_ids(ids, action_extractor)
         if valid_ids:
+            info['parse_tier'] = 'structured'
             return valid_ids, valid_names
 
     # --- Tier 2: inline integer IDs ---
@@ -204,22 +211,28 @@ def extract_actions_from_command(command, action_extractor, empty_idx, action_db
     if ids:
         valid_ids, valid_names = _resolve_ids(ids, action_extractor)
         if valid_ids:
+            info['parse_tier'] = 'id_based'
             return valid_ids, valid_names
 
     # --- Tier 3: legacy fuzzy name extraction ---
     extracted_decisions = _try_legacy_extraction(command) or []
     if extracted_decisions:
         action_ids, valid_actions = [], []
+        used_vdb = False
         for decision in extracted_decisions:
+            if decision.upper() not in action_extractor.full_action_dict:
+                used_vdb = True
             db_ids, db_actions = action_extractor.extract_and_search_actions(
                 decision, action_db_manager
             )
             action_ids.extend(db_ids)
             valid_actions.extend(db_actions)
         if action_ids:
+            info['parse_tier'] = 'vectordb' if used_vdb else 'legacy'
             return action_ids, valid_actions
 
     # Nothing found anywhere.
+    info['parse_tier'] = 'none'
     return [empty_idx], ["EMPTY ACTION"]
 
 

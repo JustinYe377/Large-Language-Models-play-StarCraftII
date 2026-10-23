@@ -49,6 +49,9 @@ class Protoss_Bot(BotAI):
         self.iteration = 0
         self.lock = lock
         self.transaction = transaction
+        # Telemetry: how often the hard-coded 12:00 attack rule fired, so
+        # rule-driven attacks can be told apart from LLM MULTI-ATTACKs.
+        self.scripted_attack_count = 0
         self.worker_supply = 12  # 农民数量
         self.army_supply = 0  # 部队人口
         self.base_pending = 0
@@ -1998,6 +2001,7 @@ class Protoss_Bot(BotAI):
         # 锁定并读取动作
         with self.lock:
             self.transaction['information'] = information
+            self.transaction['game_loop'] = self.state.game_loop
         print("action", self.transaction['action'])
         while self.transaction['action'] is None:
             time.sleep(0.001)
@@ -2025,6 +2029,7 @@ class Protoss_Bot(BotAI):
         else:
             print(f'Error: Method {method_name} does not exist!')
         if self.time_formatted >= "12:00" and self.supply_used >= 100:
+            self.scripted_attack_count += 1
             await self.attack()
         # 进行常规操作
         await self.distribute_workers()
@@ -2036,6 +2041,7 @@ class Protoss_Bot(BotAI):
             self.transaction['iter'] = iteration
             self.transaction['action_failures'] = copy.deepcopy(self.temp_failure_list)
             self.transaction['action_executed'] = copy.deepcopy(self.action_dict[action])
+            self.transaction['scripted_attack_count'] = self.scripted_attack_count
             #
             # print("self.temp_failure_list", self.temp_failure_list)
             # print("self.transaction['action_failures']", self.transaction['action_failures'])
@@ -2128,10 +2134,13 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 根据agent_type决定保存路径
-    if args.agent_type in ["random", "llama2_7b", "gemini", "chatgpt", "gpt4", "glm3", "prompt1", "qwen", "glm-4",
-                           "APU",
-                           "claude2", "qwen_7b"]:
-        base_dir = os.path.join(current_dir, '..', '..', 'log', f'{args.agent_type}_log')
+    # 'gpt' and 'deepseek' run ChatGPTAgent, so their replays go next to its
+    # logs in chatgpt_log/game_<time>_<pid>/.
+    log_name = 'chatgpt' if args.agent_type in ("gpt", "deepseek") else args.agent_type
+    if log_name in ["random", "llama2_7b", "gemini", "chatgpt", "gpt4", "glm3", "prompt1", "qwen", "glm-4",
+                    "APU",
+                    "claude2", "qwen_7b"]:
+        base_dir = os.path.join(current_dir, '..', '..', 'log', f'{log_name}_log')
     else:
         print(f"Unknown agent_type: {args.agent_type}. Defaulting to random_log.")
         base_dir = os.path.join(current_dir, '..', '..', 'log', 'random_log')
@@ -2160,6 +2169,7 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
     with lock:
         transaction['done'] = True
         transaction['result'] = result
+        transaction['replay_path'] = os.path.abspath(final_replay_path)
     done_event.set()  # Set done_event when the game is over
     game_end_event.set()  # Set game_end_event when the game is over
 
@@ -2169,8 +2179,9 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 根据agent_type决定保存路径
-    if args.agent_type in ["random", "llama2", "gemini", "chatgpt", "gpt4", "glm3", "prompt1", "qwen"]:
-        base_dir = os.path.join(current_dir, '..', '..', 'log', f'{args.agent_type}_log')
+    log_name = 'chatgpt' if args.agent_type in ("gpt", "deepseek") else args.agent_type
+    if log_name in ["random", "llama2", "gemini", "chatgpt", "gpt4", "glm3", "prompt1", "qwen"]:
+        base_dir = os.path.join(current_dir, '..', '..', 'log', f'{log_name}_log')
     else:
         print(f"Unknown agent_type: {args.agent_type}. Defaulting to random_log.")
         base_dir = os.path.join(current_dir, '..', '..', 'log', 'random_log')
@@ -2196,6 +2207,7 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
     with lock:
         transaction['done'] = True
         transaction['result'] = result
+        transaction['replay_path'] = os.path.abspath(final_replay_path)
     done_event.set()  # Set done_event when the game is over
     game_end_event.set()  # Set game_end_event when the game is over
 

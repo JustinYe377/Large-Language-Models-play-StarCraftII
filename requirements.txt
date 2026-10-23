@@ -59,6 +59,7 @@ nbformat @ file:///home/conda/feedstock_root/build_artifacts/nbformat_1651607001
 nest-asyncio @ file:///home/conda/feedstock_root/build_artifacts/nest-asyncio_1648959695634/work
 notebook @ file:///home/conda/feedstock_root/build_artifacts/notebook_1654636967533/work
 numpy @ file:///D:/bld/numpy_1660672976152/work
+openai>=1,<3
 opencv-python==4.6.0
 ordered-set==4.1.0
 packaging @ file:///home/conda/feedstock_root/build_artifacts/packaging_1637239678211/work
@@ -110,6 +111,7 @@ tornado @ file:///D:/bld/tornado_1656937966227/work
 traitlets @ file:///home/conda/feedstock_root/build_artifacts/traitlets_1655411388954/work
 typing_extensions @ file:///home/conda/feedstock_root/build_artifacts/typing_extensions_1656706066251/work
 urllib3==1.26.12
+wandb>=0.15.9
 wcwidth @ file:///home/conda/feedstock_root/build_artifacts/wcwidth_1592931742287/work
 webencodings==0.5.1
 websocket-client==1.4.1

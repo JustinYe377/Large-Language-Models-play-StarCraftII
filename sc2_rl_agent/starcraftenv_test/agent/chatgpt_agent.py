@@ -11,6 +11,8 @@ from sc2_rl_agent.starcraftenv_test.utils.action_vector_test import ActionDBMana
 from sc2_rl_agent.starcraftenv_test.utils.resource_filter import (
     parse_resources, filter_by_resources, format_rejections_for_actor,
 )
+from sc2_rl_agent.starcraftenv_test.telemetry.agent_hooks import AgentTelemetry
+from sc2_rl_agent.starcraftenv_test.telemetry.funnel import mix_with_sources, source_labels
 
 
 class ChatGPTAgent:
@@ -85,6 +87,23 @@ class ChatGPTAgent:
         # Track resource-rejected actions across ticks so we can feed them
         # back to the actor as 'Action failed: ...' lines on the next prompt.
         self._recent_resource_rejections: list = []
+
+        # Telemetry (measurement only). reasoning_effort defaults to None,
+        # which leaves the API request exactly as before.
+        self.L2.chatbot.reasoning_effort = getattr(args, "LLM_reasoning_effort", None)
+        self._last_parse_tier = None
+        self.telemetry = AgentTelemetry.create(self, args, extra_config={
+            "prompt_class": getattr(args, "prompt_class", None),
+            "prompt_type": prompt_type,
+            "K": getattr(args, "prompt_K", None),
+            "action_interval": action_interval,
+            "action_window": action_window,
+            "action_mix_rate": action_mix_rate,
+            "last_k": last_k,
+            "chunk_window": chunk_window,
+            "resource_filter_enabled": args.player_race == "Protoss",
+            "game_folder": self.game_folder,
+        })
 
         print(f"[ChatGPTAgent] Initialized. Resource filter active "
               f"(process {self.process_id})")
@@ -217,19 +236,27 @@ class ChatGPTAgent:
         return game_info
 
     def _get_next_action(self):
+        # Queue entries are (action_id, slot_source, tick_id); the env only
+        # ever sees action_id.
         if self.action_queue:
-            return self.action_queue.popleft()
-        return self.empty_action_idx
+            action_id, slot_source, tick_id = self.action_queue.popleft()
+        else:
+            action_id, slot_source, tick_id = self.empty_action_idx, "queue_empty", None
+        self.telemetry.on_dequeue(action_id, slot_source, tick_id)
+        return action_id
 
     def extract_actions_from_command(self, command):
         if isinstance(command, list):
             command = " ".join(command)
         self.action_extractor = ActionExtractor(self.action_dict)
         empty_idx = self.action_description.empty_action_id
+        info = {}
         action_ids, valid_actions = extract_actions_from_command(
             command, action_extractor=self.action_extractor,
             empty_idx=empty_idx, action_db_manager=self.action_db_manager,
+            info=info,
         )
+        self._last_parse_tier = info.get('parse_tier')
         return action_ids, valid_actions
 
     def action(self, observation):
@@ -255,6 +282,8 @@ class ChatGPTAgent:
         raw_observation = observation['information']
         action_executed = observation['action_executed']
         action_failures = observation['action_failures']
+
+        self.telemetry.on_observation(observation)
 
         self.executed_actions_queue.append(action_executed)
         self.failed_actions_queue.append(action_failures)
@@ -286,6 +315,7 @@ class ChatGPTAgent:
             }
             self._save_combined_input_to_file(combined_input)
 
+            self.telemetry.before_llm()
             L2_summaries = self.L2.query(combined_input)
             command = L2_summaries
             self._save_commander_to_file(command)
@@ -295,12 +325,18 @@ class ChatGPTAgent:
             action_ids, action_values = self.extract_actions_from_command(command)
             print(f"[debug] extracted {len(action_ids)} actions: {action_ids}")
 
+            proposed_ids = list(action_ids)
             # ---- Resource filter: drop unaffordable actions ----
             action_ids = self._apply_resource_filter(action_ids, raw_observation)
             # ----------------------------------------------------
+            kept_ids = list(action_ids)
 
-            mixed_actions = self.mix_actions(action_ids)
-            self.action_queue.extend(mixed_actions)
+            # Same placement as mix_actions, with each slot tagged by source.
+            sources = source_labels(proposed_ids, kept_ids, self._last_parse_tier, self.empty_action_idx)
+            slots = mix_with_sources(action_ids, sources, self.action_window, self.action_mix_rate,
+                                     self.empty_action_idx)
+            tick_id = self.telemetry.on_tick(command, self._last_parse_tier, proposed_ids, kept_ids, slots)
+            self.action_queue.extend((aid, src, tick_id) for aid, src in slots)
             print("action_queue:", self.action_queue)
 
             self.summary_queue.clear()
@@ -318,15 +354,6 @@ class ChatGPTAgent:
         ACTION entries from the resource filter; those just become more
         empties in the mixed sequence.
         """
-        empty_action = self.empty_action_idx
-        mixed_actions = []
-        num_real_actions = int(self.action_window * self.action_mix_rate)
-        if num_real_actions > len(real_actions):
-            num_real_actions = len(real_actions)
-        real_action_indices = np.linspace(start=0, stop=self.action_window - 1, num=num_real_actions, dtype=int)
-        for i in range(self.action_window):
-            if i in real_action_indices and real_actions:
-                mixed_actions.append(real_actions.pop(0))
-            else:
-                mixed_actions.append(empty_action)
-        return mixed_actions
+        slots = mix_with_sources(real_actions, [], self.action_window, self.action_mix_rate,
+                                 self.empty_action_idx)
+        return [action_id for action_id, _ in slots]

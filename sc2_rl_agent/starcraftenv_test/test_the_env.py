@@ -32,6 +32,7 @@ build in ai 难度
 def agent_test(agent, env):
     observation, _ = env.reset()  # Get initial observation
     done = False
+    result = None
 
     while not done:
         action = agent.action(observation)
@@ -39,6 +40,7 @@ def agent_test(agent, env):
 
         if done:
             break
+    return result, observation
 
 
 def initialize_and_test_agent(args):
@@ -52,9 +54,13 @@ def initialize_and_test_agent(args):
     print("action_dict", action_dict)
 
     # 生成提示
-    sc2prompt = StarCraftIIPrompt_V2(race=args.player_race, K="5", action_dict=action_dict,game_style="aggressive")
+    K = 5
+    sc2prompt = StarCraftIIPrompt_V2(race=args.player_race, K=str(K), action_dict=action_dict,game_style="aggressive")
     system_prompt, example_input_prompt, example_output_prompt = sc2prompt.generate_prompts()
-    example_prompt = [example_input_prompt.format(K_1=4), example_output_prompt]
+    example_prompt = [example_input_prompt.format(K_1=K - 1), example_output_prompt]
+    # Recorded in the telemetry run config.
+    args.prompt_class = type(sc2prompt).__name__
+    args.prompt_K = K
 
     # 创建并测试agent
     if args.agent_type == 'random':
@@ -68,7 +74,15 @@ def initialize_and_test_agent(args):
         agent = ChatGPTAgent(args.LLM_model_name, args.LLM_api_key, args.LLM_api_base,
                              system_prompt, example_prompt, args.LLM_temperature,
                              args, action_description)
-        agent_test(agent, env)
+        # Always close the telemetry run, including on Ctrl+C or a crash.
+        result, final_observation = "crash", None
+        try:
+            result, final_observation = agent_test(agent, env)
+        except KeyboardInterrupt:
+            result = "aborted"
+            raise
+        finally:
+            agent.telemetry.finish(result, final_observation)
     elif args.agent_type == 'llama2':
         agent = Llama2Agent(args.LLM_model_name, args.LLM_api_key, args.LLM_api_base,
                             system_prompt, example_prompt, args.LLM_temperature,
@@ -172,6 +186,22 @@ if __name__ == '__main__':
     real_time_group.add_argument('--no_real_time', dest='real_time', action='store_false',
                                  help='Run SC2 in non-realtime / fast-forward mode (default).')
     parser.set_defaults(real_time=False)
+
+    # Telemetry (see README "Telemetry"). Local JSONL is always written;
+    # these flags only control the wandb sink.
+    parser.add_argument('--wandb_mode', type=str, default=None,
+                        choices=['online', 'offline', 'disabled'],
+                        help='wandb sink mode. Default: $WANDB_MODE if set, else offline.')
+    parser.add_argument('--exp_group', type=str, default='adhoc',
+                        help='wandb run group used to compare experiments.')
+    parser.add_argument('--LLM_reasoning_effort', type=str, default=None,
+                        help='Passed to the API via extra_body when set. Default: not sent.')
+    parser.add_argument('--price_in_hit', type=float, default=0.0,
+                        help='USD per 1M cache-hit input tokens (0 = no cost estimate).')
+    parser.add_argument('--price_in_miss', type=float, default=0.0,
+                        help='USD per 1M cache-miss input tokens.')
+    parser.add_argument('--price_out', type=float, default=0.0,
+                        help='USD per 1M output tokens.')
 
     # Commander strategy: 'macro' (default) or 'rush' (4-Gate Stalker all-in).
     parser.add_argument('--strategy', type=str, default='macro',

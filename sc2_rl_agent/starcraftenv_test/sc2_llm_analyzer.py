@@ -31,6 +31,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
+try:
+    from sc2_rl_agent.starcraftenv_test.telemetry.funnel import fail_cat
+except ImportError:  # run as a plain script from this directory
+    from telemetry.funnel import fail_cat
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PATHS  (relative to this script)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,7 +81,20 @@ def load_game(folder):
     for stem in TARGET_STEMS:
         p = find_file(folder, stem)
         data[stem] = load_jsonl(p) if p else []
+    # Telemetry slot sources (games recorded after Phase-0 telemetry only).
+    slots = folder / "slots.jsonl"
+    data["slots"] = load_jsonl(slots) if slots.exists() else []
     return data
+
+
+# slot_source (telemetry) -> empty_type used in this report
+SLOT_EMPTY_TYPE = {
+    "parse_empty": "parse_failure",
+    "llm":         "llm_silent",      # the LLM itself chose EMPTY ACTION
+    "padding":     "padding",
+    "filter_drop": "filter_drop",
+    "queue_empty": "padding",
+}
 
 
 def list_games():
@@ -152,17 +170,6 @@ def phase(t):
     return "late (10m+)"
 
 
-def fail_cat(reason):
-    r = reason.lower()
-    if "cannot afford"     in r: return "cannot afford"
-    if "supply"            in r: return "supply blocked"
-    if "idle" in r or "already chrono" in r: return "chrono timing"
-    if "no available"      in r: return "building unavailable"
-    if "from warp gate"    in r: return "warp gate confusion"
-    if "placement"         in r: return "placement error"
-    if "not idle" in r or "not the right" in r: return "building busy"
-    return "other"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # BUILD DATAFRAME
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +179,11 @@ def build_df(data):
     failures  = data["action_failures"]
     combined  = data["combined_input"]
     commander = data["commander"]
+
+    # Line i of action_executed.json is the result of the slot dequeued at
+    # step i-1, which telemetry records as resolve_step == i.
+    slot_type = {r["resolve_step"]: SLOT_EMPTY_TYPE.get(r.get("slot_source"), "unknown")
+                 for r in data.get("slots", []) if r.get("resolve_step") is not None}
 
     rows = []
     for i, action in enumerate(executed):
@@ -190,7 +202,9 @@ def build_df(data):
         is_valid = bool(action and action != "EMPTY ACTION")
         is_empty = not is_valid
 
-        if is_empty:
+        if is_empty and i in slot_type:
+            etype = slot_type[i]
+        elif is_empty:
             if has_tags is True:
                 etype = "parse_failure"
             elif has_tags is False:
@@ -283,6 +297,8 @@ def analyze(df, data):
     parse_f = int((df.empty_type == "parse_failure").sum())
     silent  = int((df.empty_type == "llm_silent").sum())
     unk     = int((df.empty_type == "unknown").sum())
+    padding = int((df.empty_type == "padding").sum())
+    fdrop   = int((df.empty_type == "filter_drop").sum())
 
     return dict(n=n, valid=valid, empty=empty,
                 fail_events=len(all_fails), fail_steps=int(df.has_fail.sum()),
@@ -290,7 +306,8 @@ def analyze(df, data):
                 fail_cat_cnts=fail_cat_cnts, milestones=milestones,
                 empty_runs=runs[:10], phase_stats=phase_stats,
                 avg_late_gas=avg_gas, avg_late_minerals=avg_min,
-                parse_fail=parse_f, llm_silent=silent, unk_empty=unk)
+                parse_fail=parse_f, llm_silent=silent, unk_empty=unk,
+                padding=padding, filter_drop=fdrop)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEXT REPORT
@@ -312,7 +329,9 @@ def write_report(r, game_name, out_path):
       f"  EMPTY (no action)        : {empty}  ({empty/n*100:.1f}%)",
       f"    ├─ LLM parse failure   : {r['parse_fail']}  (LLM had action tags, extractor missed them)",
       f"    ├─ LLM silent          : {r['llm_silent']}  (LLM produced no action tags at all)",
-      f"    └─ Unknown             : {r['unk_empty']}  (no commander data to cross-check)",
+      f"    ├─ Unknown             : {r['unk_empty']}  (no commander data to cross-check)",
+      f"    ├─ Mix padding         : {r['padding']}  (EMPTY inserted by mix_actions; telemetry runs only)",
+      f"    └─ Filter drop         : {r['filter_drop']}  (replaced by the resource filter; telemetry runs only)",
       f"  Steps with failures      : {r['fail_steps']}  ({r['fail_steps']/n*100:.1f}%)",
       f"  Total failure events     : {fails}", "")
 
