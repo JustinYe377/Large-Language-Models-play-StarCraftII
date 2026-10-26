@@ -4,7 +4,8 @@ Backfill on a hand-built 20-step legacy game folder.
 Tick 0 (step 0):  "ACTIONS: 0, 19, 22, 23, 1" -> 5 real slots at positions [0, 2, 4, 6, 9]
 Tick 1 (step 10): "ACTIONS: 0, 22"            -> 2 slots at [0, 9]; BUILD GATEWAY was
                   rejected by the resource filter -> 1 llm + 1 filter_drop
-Dequeued slots: 20, of which llm = 5 + 1 = 6 -> padding_share = 14 / 20.
+Dequeued slots: 20 = 6 llm + 1 filter_drop + 13 padding
+  -> padding_share = 13 / 20, nonreal_share = 14 / 20.
 """
 
 import json
@@ -70,7 +71,8 @@ def test_backfill_infers_padding_and_funnel(legacy_game):
     assert s["slots_llm"] == 6
     assert s["slots_filter_drop"] == 1
     assert s["slots_padding"] == 13
-    assert s["padding_share"] == pytest.approx(14 / 20)
+    assert s["padding_share"] == pytest.approx(13 / 20)
+    assert s["nonreal_share"] == pytest.approx(14 / 20)
     assert s["parse_rate"] == pytest.approx(7 / 10)
     assert s["admit_rate"] == pytest.approx(6 / 7)
     # Only BUILD PYLON failed; the MULTI-ATTACK failure belongs to another source.
@@ -84,7 +86,9 @@ def test_backfill_infers_padding_and_funnel(legacy_game):
     assert (out / "game_summary.json").exists()
     ticks = [json.loads(l) for l in open(out / "decision_ticks.jsonl")]
     assert [t["n_queued_real"] for t in ticks] == [5, 1]
-    assert [t["n_padding"] for t in ticks] == [5, 9]
+    assert [t["n_padding"] for t in ticks] == [5, 8]
+    assert [t["n_filter_drop_slots"] for t in ticks] == [0, 1]
+    assert [t["n_nonreal_slots"] for t in ticks] == [5, 9]
     run_start = json.loads(open(out / "events.jsonl").readline())
     assert run_start["config"]["backfilled"] is True
     assert run_start["config"]["padding_inferred"] is True

@@ -13,6 +13,9 @@ from .funnel import build_tick, resolve_slot
 from .game_metrics import game_time_seconds
 from .llm_meter import LLMMeter
 from .run_logger import RunLogger, resolve_mode, COMMAND_PREVIEW_CHARS
+from .schema import SCRIPTED_ATTACK_KEYS
+
+OBS_EXTRA_KEYS = ("game_loop", "replay_path") + SCRIPTED_ATTACK_KEYS
 
 
 def _safe(default=None):
@@ -63,8 +66,8 @@ class AgentTelemetry:
                 if hasattr(args, "wandb_mode"):
                     mode = resolve_mode(args.wandb_mode)
                 else:
-                    # Entry points that predate telemetry (multiprocess_test,
-                    # worker.py) only write JSONL unless WANDB_MODE is set.
+                    # Entry points without the telemetry flags (e.g.
+                    # 2agent_test.py) only write JSONL unless WANDB_MODE is set.
                     mode = resolve_mode(os.environ.get("WANDB_MODE") or "disabled")
                 logger = RunLogger(args, agent.game_folder, mode=mode, extra_config=extra_config)
             meter = LLMMeter(sink=logger.log_llm_call, on_complete=logger.log_llm_call_complete,
@@ -102,8 +105,7 @@ class AgentTelemetry:
         if t is not None:
             self.game_time_s = t
         self._resolve_pending(observation)
-        extra = {k: observation.get(k) for k in ("game_loop", "scripted_attack_count", "replay_path")
-                 if observation.get(k) is not None}
+        extra = {k: observation.get(k) for k in OBS_EXTRA_KEYS if observation.get(k) is not None}
         self.logger.log_observation(self.step, self.game_time_s, raw,
                                     action_failures=observation.get("action_failures"), extra=extra)
 
@@ -144,12 +146,10 @@ class AgentTelemetry:
         extra = {}
         if isinstance(final_observation, dict):
             self._resolve_pending(final_observation)
-            for k in ("replay_path", "scripted_attack_count", "game_loop"):
+            for k in OBS_EXTRA_KEYS:
                 if final_observation.get(k) is not None:
                     extra[k] = final_observation[k]
-            if isinstance(extra.get("scripted_attack_count"), int):
-                self.logger.scripted_attack_count = max(self.logger.scripted_attack_count,
-                                                        extra["scripted_attack_count"])
+            self.logger.update_scripted_attack(extra, self.game_time_s)
         elif self.pending is not None:
             action_id, source, tick_id, step, t = self.pending
             self.pending = None

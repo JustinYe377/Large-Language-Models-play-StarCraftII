@@ -11,6 +11,7 @@ from sc2_rl_agent.starcraftenv_test.utils.action_vector_test import ActionDBMana
 from sc2_rl_agent.starcraftenv_test.utils.resource_filter import (
     parse_resources, filter_by_resources, format_rejections_for_actor,
 )
+from sc2_rl_agent.starcraftenv_test.utils.path_utils import agent_log_dir_name
 from sc2_rl_agent.starcraftenv_test.telemetry.agent_hooks import AgentTelemetry
 from sc2_rl_agent.starcraftenv_test.telemetry.funnel import mix_with_sources, source_labels
 
@@ -72,7 +73,8 @@ class ChatGPTAgent:
                              example_prompt=self.example_prompt, chunk_window=self.chunk_window,
                              prompt_type=prompt_type)
         self.get_opposite_bot_name()
-        self.base_save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'log', 'chatgpt_log')
+        self.base_save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'log',
+                                          agent_log_dir_name(getattr(args, 'agent_type', None)))
         self.action_db_manager = self.init_action_db()
         self.game_folder = os.path.join(self.base_save_dir, f"game_{self.current_time}_{self.process_id}")
         if not os.path.exists(self.game_folder):

@@ -43,3 +43,18 @@ def calculate_relative_path(target, start):
 if __name__ == "__main__":
     utils_path = construct_relative_path(['sc2_rl_agent', 'starcraftenv_test', 'utils'])
     print(f"The path {utils_path} {'exists' if path_exists(utils_path) else 'does not exist'}.")
+
+
+def agent_log_dir_name(agent_type):
+    """
+    Folder under log/ that holds a game's agent logs, telemetry and replay.
+
+    ChatGPTAgent serves three aliases: 'deepseek' gets its own deepseek_log,
+    'gpt' shares chatgpt_log with 'chatgpt'. Every other agent type keeps the
+    original '<agent_type>_log' naming.
+    """
+    if agent_type == "deepseek":
+        return "deepseek_log"
+    if agent_type in ("gpt", "chatgpt", None):
+        return "chatgpt_log"
+    return f"{agent_type}_log"

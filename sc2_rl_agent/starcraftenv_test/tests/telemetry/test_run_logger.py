@@ -22,8 +22,10 @@ SUMMARY_KEYS = [
     "total_retries", "tokens_prompt", "tokens_completion", "tokens_reasoning", "cache_hit_tokens",
     "cache_miss_tokens", "cache_hit_ratio", "est_cost_usd", "latency_p50", "latency_p95",
     "wall_clock_share_waiting_llm", "parse_rate", "admit_rate", "queue_rate", "exec_success",
-    "conversion", "padding_share", "peak_supply", "peak_workers", "max_bases", "time_to_first_attack_s",
-    "scripted_attack_count", "army_comp_entropy_mean", "supply_blocked_s", "model_resolved",
+    "conversion", "padding_share", "nonreal_share", "peak_supply", "peak_workers", "max_bases",
+    "time_to_first_attack_s", "scripted_attack_rule_steps", "scripted_attack_order_steps",
+    "scripted_attack_units_ordered", "scripted_attack_first_order_s", "army_comp_entropy_mean",
+    "supply_blocked_s", "model_resolved",
 ]
 
 
@@ -71,7 +73,9 @@ def run_lifecycle(logger):
     for step, (aid, src) in enumerate(slots):
         logger.log_observation(step, float(step), raw_obs(step, supply_left=0 if step < 3 else 5,
                                                           zealots=2, stalkers=1),
-                               action_failures=[], extra={"scripted_attack_count": 0})
+                               action_failures=[],
+                               extra={"scripted_attack_rule_steps": step, "scripted_attack_order_steps": max(0, step - 7),
+                                      "scripted_attack_units_ordered": 4 * max(0, step - 7)})
         logger.log_slot_outcome(resolve_slot(aid, NAMES[aid], src, 0, step, float(step), NAMES[aid], []))
     logger.log_event("note", level="info", msg="hello")
     return logger.finish("Result.Victory", {})
@@ -105,8 +109,13 @@ def test_disabled_lifecycle_writes_complete_jsonl_and_summary(tmp_path):
     assert summary["model_resolved"] == "deepseek-v4-flash-0501"
     assert summary["cache_hit_ratio"] == pytest.approx(0.8)
     assert summary["est_cost_usd"] == pytest.approx((1600 * 0.1 + 400 * 1.0 + 100 * 2.0) / 1e6)
-    assert summary["padding_share"] == pytest.approx(0.7)
+    assert summary["padding_share"] == pytest.approx(0.6)
+    assert summary["nonreal_share"] == pytest.approx(0.7)
     assert summary["time_to_first_attack_s"] == 9.0      # MULTI-ATTACK is the last real slot
+    assert summary["scripted_attack_rule_steps"] == 9
+    assert summary["scripted_attack_order_steps"] == 2
+    assert summary["scripted_attack_units_ordered"] == 8
+    assert summary["scripted_attack_first_order_s"] == 8.0
     assert summary["supply_blocked_s"] == pytest.approx(3.0)
     assert summary["army_comp_entropy_mean"] > 0
 
@@ -123,11 +132,26 @@ def test_config_excludes_api_key(tmp_path):
     logger.finish("aborted")
 
 
+@pytest.mark.parametrize("result,code,tag", [("Result.Victory", 0, None), ("aborted", 130, "aborted"),
+                                             ("crash", 1, "crash")])
+def test_abnormal_results_are_tagged_with_exit_code(tmp_path, result, code, tag):
+    run = FakeRun()
+    mod, _ = fake_wandb(run)
+    logger = RunLogger(make_args(), str(tmp_path), mode="offline", wandb_module=mod, register_atexit=False)
+    logger.finish(result)
+    assert run.exit_code == code
+    if tag:
+        assert run.tags[-1] == tag and "phase0" in run.tags
+    else:
+        assert run.tags == ("deepseek", "phase0")
+
+
 class FakeRun:
     def __init__(self, fail_on=()):
         self.fail_on = set(fail_on)
         self.logged, self.metrics, self.artifacts = [], [], []
         self.summary = {}
+        self.tags = ("deepseek", "phase0")
         self.config = types.SimpleNamespace(update=lambda *a, **k: None)
         self.exit_code = None
 
@@ -319,7 +343,7 @@ def test_agent_telemetry_simulated_game(tmp_path):
     for step in range(12):
         obs = {"information": raw_obs(step), "action_executed": executed[-1] if executed else [],
                "action_failures": failures[-1] if failures else [], "game_loop": int(step * 22.4),
-               "scripted_attack_count": 0}
+               "scripted_attack_rule_steps": 0}
         tm.on_observation(obs)
         if step % 10 == 0:
             tm.before_llm()
@@ -336,13 +360,16 @@ def test_agent_telemetry_simulated_game(tmp_path):
         failures.append(["Action failed: BUILD PYLON, Reason: placement failed"] if aid == 19 else [])
 
     final = {"action_executed": executed[-1], "action_failures": failures[-1],
-             "replay_path": "/tmp/x.SC2Replay", "scripted_attack_count": 3}
+             "replay_path": "/tmp/x.SC2Replay", "scripted_attack_rule_steps": 3,
+             "scripted_attack_order_steps": 1, "scripted_attack_units_ordered": 6}
     summary = tm.finish("Result.Defeat", final)
     assert summary["result"] == "Defeat"
     assert summary["n_steps"] == 12 and summary["n_ticks"] == 2
     assert summary["llm_slots_dequeued"] == 3          # 2 from tick 0, 1 from tick 1 (step 10)
     assert summary["exec_success"] == pytest.approx(2 / 3)   # the BUILD PYLON slot failed
-    assert summary["scripted_attack_count"] == 3
+    assert summary["scripted_attack_rule_steps"] == 3
+    assert summary["scripted_attack_order_steps"] == 1
+    assert summary["scripted_attack_units_ordered"] == 6
     assert summary["replay_path"] == "/tmp/x.SC2Replay"
     slots = read_jsonl(tmp_path / "slots.jsonl")
     assert len(slots) == 12 and all(s["resolved"] for s in slots)

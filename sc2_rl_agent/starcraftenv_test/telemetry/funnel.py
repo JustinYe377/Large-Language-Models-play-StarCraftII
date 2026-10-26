@@ -1,9 +1,10 @@
 """
 Conversion funnel: LLM proposal -> parsed -> affordable -> queued -> executed.
 
-Padding slots (anything whose slot_source is not `llm`) are tracked but never
-enter the conversion denominator. That is the main correction over the old
-analyzer, which counted mix_actions padding as "LLM silent".
+Non-real slots (any slot_source other than `llm`: padding, filter_drop,
+parse_empty, queue_empty) are counted per source but never enter a funnel
+denominator. That is the main correction over the old analyzer, which
+counted all of them as "LLM silent".
 """
 
 import re
@@ -82,6 +83,7 @@ def build_tick(tick_id, call_id, game_step, game_time_s, k_requested, parse_tier
     n_after_filter = n_parsed - n_filter_dropped
     queued_real = [aid for aid, src in slots if src == "llm"]
     n_queued_real = len(queued_real)
+    by_source = Counter(src for _, src in slots)
     return DecisionTick(
         tick_id=tick_id,
         call_id=call_id,
@@ -94,9 +96,12 @@ def build_tick(tick_id, call_id, game_step, game_time_s, k_requested, parse_tier
         n_after_filter=n_after_filter,
         n_filter_dropped=n_filter_dropped,
         n_queued_real=n_queued_real,
-        n_padding=len(slots) - n_queued_real,
+        n_padding=by_source["padding"],
         proposed_action_ids=proposed_ids if n_parsed else [],
         queued_action_ids=queued_real,
+        n_filter_drop_slots=by_source["filter_drop"],
+        n_parse_empty_slots=by_source["parse_empty"],
+        n_nonreal_slots=len(slots) - n_queued_real,
         n_truncated=n_after_filter - n_queued_real,
         action_window=len(slots),
         llm_error=llm_error,
@@ -210,12 +215,17 @@ class FunnelCounter:
             "exec_success": _ratio(succeeded, max(resolved, 1)),
             "conversion": _ratio(succeeded, k),
         }
+        # padding_share: mix_actions filler only. nonreal_share: every slot
+        # that is not an LLM decision (padding + filter_drop + parse_empty
+        # + queue_empty).
         if slot_counts is not None:
             total = sum(slot_counts.values())
-            out["padding_share"] = _ratio(total - slot_counts.get("llm", 0), total)
+            out["padding_share"] = _ratio(slot_counts.get("padding", 0), total)
+            out["nonreal_share"] = _ratio(total - slot_counts.get("llm", 0), total)
         else:
             window = sum(t.action_window for t in ticks)
             out["padding_share"] = _ratio(sum(t.n_padding for t in ticks), window)
+            out["nonreal_share"] = _ratio(sum(t.n_nonreal_slots for t in ticks), window)
         return out
 
     def rolling(self):

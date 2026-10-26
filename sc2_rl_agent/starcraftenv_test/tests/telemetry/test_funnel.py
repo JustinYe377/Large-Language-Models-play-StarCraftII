@@ -53,7 +53,12 @@ def test_fake_tick_k5_parse4_filter1_window10():
     assert tick.n_after_filter == 3
     assert tick.n_filter_dropped == 1
     assert tick.n_queued_real == 3
-    assert tick.n_padding == 7
+    # The spec's "padding = 7" is every non-real slot; it is now split by source.
+    assert tick.n_nonreal_slots == 7
+    assert tick.n_padding == 6
+    assert tick.n_filter_drop_slots == 1
+    assert tick.n_parse_empty_slots == 0
+    assert tick.n_queued_real + tick.n_nonreal_slots == tick.action_window == 10
     assert tick.n_truncated == 0
     assert tick.queued_action_ids == [0, 19, 23]
     assert [s for _, s in slots].count("filter_drop") == 1
@@ -65,7 +70,8 @@ def test_fake_tick_k5_parse4_filter1_window10():
     assert r["parse_rate"] == pytest.approx(0.8)
     assert r["admit_rate"] == pytest.approx(0.75)
     assert r["queue_rate"] == pytest.approx(1.0)
-    assert r["padding_share"] == pytest.approx(0.7)
+    assert r["padding_share"] == pytest.approx(0.6)
+    assert r["nonreal_share"] == pytest.approx(0.7)
 
 
 def test_truncation_counted():
@@ -80,7 +86,9 @@ def test_parse_empty_tick():
     tick, slots = make_tick([EMPTY], [EMPTY], parse_tier="none")
     assert tick.n_parsed == 0
     assert tick.n_queued_real == 0
-    assert tick.n_padding == 10
+    assert tick.n_padding == 9
+    assert tick.n_parse_empty_slots == 1
+    assert tick.n_nonreal_slots == 10
     assert [s for _, s in slots].count("parse_empty") == 1
 
 
@@ -117,7 +125,8 @@ def test_whole_game_rates_exclude_padding():
     assert t["llm_slots_succeeded"] == 2
     assert t["exec_success"] == pytest.approx(2 / 3)
     assert t["conversion"] == pytest.approx(2 / 5)
-    assert t["padding_share"] == pytest.approx(0.7)
+    assert t["padding_share"] == pytest.approx(0.6)
+    assert t["nonreal_share"] == pytest.approx(0.7)
     assert t["slots_padding"] == 6 and t["slots_filter_drop"] == 1
 
 
@@ -147,3 +156,11 @@ def test_extractor_reports_parse_tier_without_changing_result(command, tier):
     without = extract_actions_from_command(command, extractor, desc.empty_action_id, _StubDB())
     assert info["parse_tier"] == tier
     assert with_info == without
+
+
+def test_agent_log_dir_name():
+    from sc2_rl_agent.starcraftenv_test.utils.path_utils import agent_log_dir_name
+    assert agent_log_dir_name("deepseek") == "deepseek_log"
+    assert agent_log_dir_name("gpt") == "chatgpt_log"
+    assert agent_log_dir_name("chatgpt") == "chatgpt_log"
+    assert agent_log_dir_name("random") == "random_log"

@@ -255,9 +255,18 @@ AI_BUILD_LEVELS = ['randombuild', 'rush', 'timing', 'power', 'macro', 'air']
 
 ## Telemetry
 
-Every `test_the_env.py` game run with `--agent_type gpt|chatgpt|deepseek` is recorded for comparing experiments. This is measurement only: prompts, decision frequency, the extractor, the resource filter and `mix_actions` are unchanged.
+Every game run with `--agent_type gpt|chatgpt|deepseek`, from `test_the_env.py` or `multiprocess_test.py`, is recorded for comparing experiments. This is measurement only: prompts, decision frequency, the extractor, the resource filter and `mix_actions` are unchanged.
 
-**Local JSONL is the source of truth; wandb is only a sink.** If wandb is missing, not logged in or offline, the game still runs to the end and every local file is still written. Each game folder `log/chatgpt_log/game_<time>_<pid>/` keeps the old files (`action_executed.json`, …, same format) and adds:
+**Local JSONL is the source of truth; wandb is only a sink.** If wandb is missing, not logged in or offline, the game still runs to the end and every local file is still written.
+
+Each game gets one folder, `log/<agent>_log/game_<time>_<pid>/`, which holds everything for that game: the old files (`action_executed.json`, …, same format), the replay, and the telemetry files below.
+
+| `--agent_type` | Folder |
+|---|---|
+| `deepseek` | `log/deepseek_log/` |
+| `gpt`, `chatgpt` | `log/chatgpt_log/` |
+
+The agent and the SC2 bot both take this folder name from `utils/path_utils.py::agent_log_dir_name`, so the replay always lands next to its logs. Games recorded before this change are still in `chatgpt_log/` (deepseek ones included) or have their replay in `random_log/`. `sc2_llm_analyzer.py` searches both `chatgpt_log/` and `deepseek_log/`.
 
 | File | One line per | Contents |
 |---|---|---|
@@ -267,8 +276,6 @@ Every `test_the_env.py` game run with `--agent_type gpt|chatgpt|deepseek` is rec
 | `observations.jsonl` | env step | macro metrics (minerals, supply, bases, army entropy, …) |
 | `events.jsonl` | run event | run start/end and config, warnings (e.g. `model_changed`, `wandb_disabled`) |
 | `game_summary.json` | game | all whole-game metrics below |
-
-The replay (`*.SC2Replay`) is now saved in the same folder; before, `gpt`/`deepseek` replays ended up in `random_log/`.
 
 ### wandb setup and modes
 
@@ -285,7 +292,9 @@ wandb sync wandb/offline-run-*  # upload offline runs later
 | `online` | streams to project `textsc2` |
 | `disabled` | no wandb at all; JSONL only |
 
-The CLI flag wins over `WANDB_MODE`. Other flags: `--exp_group` (wandb group, default `adhoc`), `--LLM_reasoning_effort` (sent via `extra_body` only when set), and `--price_in_hit/--price_in_miss/--price_out` (USD per 1M tokens, used for `est_cost_usd`; 0 = no estimate). Runs are named `{difficulty}-{map}-{model}-{time}-p{pid}` and tagged with agent type, difficulty, opponent race, prompt type and `phase0`. The API key is excluded from the config and scrubbed from every file before upload. wandb is only initialised in the main process; the SC2 bot subprocess never imports it. Ctrl+C still writes the summary and uploads the artifact with `result=aborted` (wandb shows such runs as *failed*, since it has no "aborted" state). `multiprocess_test.py` workers write JSONL but only use wandb when `WANDB_MODE` is set.
+The CLI flag wins over `WANDB_MODE`. Other flags: `--exp_group` (wandb group, default `adhoc`), `--LLM_reasoning_effort` (sent via `extra_body` only when set), and `--price_in_hit/--price_in_miss/--price_out` (USD per 1M tokens, used for `est_cost_usd`; 0 = no estimate). Runs are named `{difficulty}-{map}-{model}-{time}-p{pid}` and tagged with agent type, difficulty, opponent race, prompt type and `phase0`. The API key is excluded from the config and scrubbed from every file before upload. wandb is only initialised in the main process; the SC2 bot subprocess never imports it. Ctrl+C still writes the summary and uploads the artifact with `result=aborted`. wandb has no "aborted" state, so abnormal endings are made filterable another way: the run gets the result as an extra tag (`aborted`, `crash` or `unknown`), and the exit code is 130 for Ctrl+C and 1 otherwise. wandb itself shows these runs as *failed*. Filter by the tag to find them.
+
+`multiprocess_test.py` takes the same telemetry flags. Each worker records its own run (`…-p0`, `…-p1`, …) in the same `--exp_group`, and closes it even on Ctrl+C. Its unused top-level `import wandb` was removed, so neither the workers nor the SC2 bot processes forked from them load wandb before telemetry starts.
 
 ### Metric definitions
 
@@ -297,7 +306,16 @@ Each L2 decision asks the LLM for K=5 actions. The agent then queues a window of
 - `parse_empty`: EMPTY because the extractor found nothing
 - `queue_empty`: EMPTY because the queue ran dry
 
-**Only `llm` slots count as decisions. Padding never enters a denominator.** The old analyzer counted padding as "LLM silent", which is why the 6822-step table above overstates silence. Rerun it through the backfill tool (below) for corrected numbers.
+**Only `llm` slots count as decisions.** The other four sources are *non-real* slots and never enter a denominator. "Padding" always means `mix_actions` filler alone. The old analyzer lumped all non-real slots together as "LLM silent", which is why the 6822-step table above overstates silence. Rerun it through the backfill tool (below) for corrected numbers.
+
+Each decision tick records its 10-slot window by source, and the counts always add up:
+
+```
+n_queued_real + n_padding + n_filter_drop_slots + n_parse_empty_slots = action_window
+                n_nonreal_slots = action_window - n_queued_real
+```
+
+For example, K=5 with 4 parsed and 1 rejected by the filter gives 3 `llm` + 6 `padding` + 1 `filter_drop`, so `n_nonreal_slots` = 7.
 
 | Metric | Definition |
 |---|---|
@@ -306,9 +324,20 @@ Each L2 decision asks the LLM for K=5 actions. The agent then queues a window of
 | `queue_rate` | `llm` slots queued / admitted (the rest were cut off by the window, see `truncated_actions`) |
 | `exec_success` | `llm` slots that did not fail / `llm` slots executed. A slot fails only if the next step's `action_failures` names *that* action, because failures from scripted `defend()` share the same list. |
 | `conversion` | successful `llm` slots / (K × number of ticks) |
-| `padding_share` | non-`llm` slots / all slots |
+| `padding_share` | `padding` slots / all slots (mix_actions filler only) |
+| `nonreal_share` | non-`llm` slots / all slots (padding + filter_drop + parse_empty + queue_empty) |
+| `slots_<source>` | dequeued slots per source, for the full breakdown |
 
-The wandb x-axis is `game_time_s` (`game_loop / 22.4`). `game/*` is logged every 5 game seconds, and `funnel/*` and `llm/*` once per decision (rolling over the last 10 decisions). The summary also has token totals, `cache_hit_ratio`, latency p50/p95, `wall_clock_share_waiting_llm`, `parse_tier_*`, `fail_cat_*`, `action_count_*`, peak supply/workers/bases, `time_to_first_attack_s`, `supply_blocked_s`, `army_comp_entropy_mean` (how evenly the army is spread across unit types), `model_resolved` (the model the API actually returned) and `scripted_attack_count`. That last one counts the steps where the hard-coded "12:00 and supply ≥ 100 → attack" rule fired, so rule-driven attacks can be told apart from the LLM's `MULTI-ATTACK`.
+The wandb x-axis is `game_time_s` (`game_loop / 22.4`). `game/*` is logged every 5 game seconds, and `funnel/*` and `llm/*` once per decision (rolling over the last 10 decisions). The summary also has token totals, `cache_hit_ratio`, latency p50/p95, `wall_clock_share_waiting_llm`, `parse_tier_*`, `fail_cat_*`, `action_count_*`, peak supply/workers/bases, `time_to_first_attack_s`, `supply_blocked_s`, `army_comp_entropy_mean` (how evenly the army is spread across unit types), and `model_resolved` (the model the API actually returned).
+
+The summary also separates the hard-coded "12:00 and supply ≥ 100 → `attack()`" rule from the LLM's own `MULTI-ATTACK` (`action_count_MULTI-ATTACK`, `time_to_first_attack_s`):
+
+| Metric | Meaning |
+|---|---|
+| `scripted_attack_rule_steps` | steps where the rule's condition held. It is checked every step, so after 12:00 this grows by one per step. |
+| `scripted_attack_order_steps` | steps where the rule actually ordered at least one unit (`attack()` only orders idle units, and only with army supply ≥ 10) |
+| `scripted_attack_units_ordered` | total unit orders the rule issued |
+| `scripted_attack_first_order_s` | game time of the rule's first real order |
 
 ### Backfilling old games
 
@@ -316,6 +345,8 @@ The wandb x-axis is `game_time_s` (`game_loop / 22.4`). `game/*` is logged every
 python -m sc2_rl_agent.starcraftenv_test.telemetry.backfill \
     --log_root sc2_rl_agent/starcraftenv_test/log/chatgpt_log --exp_group legacy --wandb_mode online
 ```
+
+Use `--log_root …/log/deepseek_log` for games recorded after the folder change.
 
 This rebuilds slot sources for old game folders by replaying the agent's queue: the same tick schedule and `mix_actions` placement, the extractor re-run on `commander.json`, and filter drops from `resource_rejections.json`. Results go to `<game>/backfill/` and the originals are not modified. Old games have no token or latency data, and their config is marked `backfilled=true, padding_inferred=true`. Each game prints `backfill_inconsistent_slots`, the number of slots where the rebuilt queue disagrees with what the env actually executed.
 

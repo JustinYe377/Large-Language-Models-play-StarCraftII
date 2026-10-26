@@ -16,6 +16,7 @@ from sc2.main import run_game
 from sc2.player import Bot, Computer, Human
 from sc2.position import Point2
 from sc2_rl_agent.starcraftenv_test.utils.action_info import ActionDescriptions
+from sc2_rl_agent.starcraftenv_test.utils.path_utils import agent_log_dir_name
 from ...config.config import map_difficulty, map_race, map_rule_bot, map_ai_build
 from collections import Counter
 
@@ -49,9 +50,14 @@ class Protoss_Bot(BotAI):
         self.iteration = 0
         self.lock = lock
         self.transaction = transaction
-        # Telemetry: how often the hard-coded 12:00 attack rule fired, so
-        # rule-driven attacks can be told apart from LLM MULTI-ATTACKs.
-        self.scripted_attack_count = 0
+        # Telemetry for the hard-coded 12:00 attack rule, so rule-driven
+        # attacks can be told apart from the LLM's MULTI-ATTACK:
+        #   rule_steps    - steps where the rule's condition held
+        #   order_steps   - of those, steps where attack() ordered >= 1 unit
+        #   units_ordered - total unit orders the rule issued
+        self.scripted_attack_rule_steps = 0
+        self.scripted_attack_order_steps = 0
+        self.scripted_attack_units_ordered = 0
         self.worker_supply = 12  # 农民数量
         self.army_supply = 0  # 部队人口
         self.base_pending = 0
@@ -2029,8 +2035,11 @@ class Protoss_Bot(BotAI):
         else:
             print(f'Error: Method {method_name} does not exist!')
         if self.time_formatted >= "12:00" and self.supply_used >= 100:
-            self.scripted_attack_count += 1
-            await self.attack()
+            ordered = await self.attack()
+            self.scripted_attack_rule_steps += 1
+            if ordered:
+                self.scripted_attack_order_steps += 1
+                self.scripted_attack_units_ordered += ordered
         # 进行常规操作
         await self.distribute_workers()
 
@@ -2041,7 +2050,9 @@ class Protoss_Bot(BotAI):
             self.transaction['iter'] = iteration
             self.transaction['action_failures'] = copy.deepcopy(self.temp_failure_list)
             self.transaction['action_executed'] = copy.deepcopy(self.action_dict[action])
-            self.transaction['scripted_attack_count'] = self.scripted_attack_count
+            self.transaction['scripted_attack_rule_steps'] = self.scripted_attack_rule_steps
+            self.transaction['scripted_attack_order_steps'] = self.scripted_attack_order_steps
+            self.transaction['scripted_attack_units_ordered'] = self.scripted_attack_units_ordered
             #
             # print("self.temp_failure_list", self.temp_failure_list)
             # print("self.transaction['action_failures']", self.transaction['action_failures'])
@@ -2051,6 +2062,8 @@ class Protoss_Bot(BotAI):
         self.isReadyForNextStep.set()
 
     async def attack(self):
+        """Returns how many units were given an order (used only for telemetry)."""
+        ordered = 0
         if self.army_supply >= 10:
             attack_units = [UnitTypeId.ZEALOT, UnitTypeId.ARCHON, UnitTypeId.STALKER, UnitTypeId.SENTRY,
                             UnitTypeId.ADEPT, UnitTypeId.HIGHTEMPLAR, UnitTypeId.DARKTEMPLAR,
@@ -2064,22 +2077,27 @@ class Protoss_Bot(BotAI):
 
                 if enemy_start_location_cleared:
                     for unit_type in attack_units:
-                        await self.assign_units_to_resource_clusters(unit_type)
+                        ordered += await self.assign_units_to_resource_clusters(unit_type)
                 else:
                     for unit_type in attack_units:
                         units = self.units(unit_type).idle
                         for unit in units:
                             unit.attack(self.enemy_start_locations[0])
+                            ordered += 1
+        return ordered
 
     async def assign_units_to_resource_clusters(self, unit_type):
         units = self.units(unit_type).idle
         resource_clusters = self.expansion_locations_list
 
+        ordered = 0
         if units.exists and resource_clusters:
             # 为每个单位随机分配一个目标资源点
             for unit in units:
                 target = random.choice(resource_clusters)
                 unit.attack(target)
+                ordered += 1
+        return ordered
 
     @staticmethod
     def neighbors4(position, distance=1) -> Set[Point2]:
@@ -2134,13 +2152,11 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 根据agent_type决定保存路径
-    # 'gpt' and 'deepseek' run ChatGPTAgent, so their replays go next to its
-    # logs in chatgpt_log/game_<time>_<pid>/.
-    log_name = 'chatgpt' if args.agent_type in ("gpt", "deepseek") else args.agent_type
-    if log_name in ["random", "llama2_7b", "gemini", "chatgpt", "gpt4", "glm3", "prompt1", "qwen", "glm-4",
-                    "APU",
-                    "claude2", "qwen_7b"]:
-        base_dir = os.path.join(current_dir, '..', '..', 'log', f'{log_name}_log')
+    # Same folder name as the agent's logs (see agent_log_dir_name), so the
+    # replay lands in the agent's game_<time>_<pid>/ folder.
+    if args.agent_type in ["random", "llama2_7b", "gemini", "chatgpt", "gpt", "deepseek", "gpt4", "glm3",
+                           "prompt1", "qwen", "glm-4", "APU", "claude2", "qwen_7b"]:
+        base_dir = os.path.join(current_dir, '..', '..', 'log', agent_log_dir_name(args.agent_type))
     else:
         print(f"Unknown agent_type: {args.agent_type}. Defaulting to random_log.")
         base_dir = os.path.join(current_dir, '..', '..', 'log', 'random_log')
@@ -2179,9 +2195,9 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 根据agent_type决定保存路径
-    log_name = 'chatgpt' if args.agent_type in ("gpt", "deepseek") else args.agent_type
-    if log_name in ["random", "llama2", "gemini", "chatgpt", "gpt4", "glm3", "prompt1", "qwen"]:
-        base_dir = os.path.join(current_dir, '..', '..', 'log', f'{log_name}_log')
+    if args.agent_type in ["random", "llama2", "gemini", "chatgpt", "gpt", "deepseek", "gpt4", "glm3",
+                           "prompt1", "qwen"]:
+        base_dir = os.path.join(current_dir, '..', '..', 'log', agent_log_dir_name(args.agent_type))
     else:
         print(f"Unknown agent_type: {args.agent_type}. Defaulting to random_log.")
         base_dir = os.path.join(current_dir, '..', '..', 'log', 'random_log')

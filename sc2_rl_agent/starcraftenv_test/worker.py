@@ -23,6 +23,7 @@ def agent_test(agent, env, args=None):
 
     observation, _ = env.reset()  # 获取初始观察
     done = False
+    result = None
 
     while not done:
         action = agent.action(observation)
@@ -30,6 +31,7 @@ def agent_test(agent, env, args=None):
 
         if done:
             break
+    return result, observation
 
 
 def random_worker(input_args):
@@ -79,13 +81,24 @@ def chatgpt_worker(input_args):
     system_prompt, example_input_prompt, example_output_prompt = sc2prompt.generate_prompts()
     example_input_prompt.format(K_1=4)
     example_prompt = [example_input_prompt, example_output_prompt]
+    # Recorded in the telemetry run config.
+    args.prompt_class = type(sc2prompt).__name__
+    args.prompt_K = 5
 
     # 创建并测试chatgpt agent
     gpt_agent = ChatGPTAgent(model_name=args.LLM_model_name, api_key=args.LLM_api_key,
                              api_base=args.LLM_api_base, system_prompt=system_prompt,
                              temperature=args.LLM_temperature, example_prompt=example_prompt,
                              args=args, action_description=action_description)
-    agent_test(gpt_agent, env, args=args)
+    # Always close the telemetry run, including on Ctrl+C or a crash.
+    result, final_observation = "crash", None
+    try:
+        result, final_observation = agent_test(gpt_agent, env, args=args)
+    except KeyboardInterrupt:
+        result = "aborted"
+        raise
+    finally:
+        gpt_agent.telemetry.finish(result, final_observation)
 
 
 

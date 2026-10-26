@@ -253,7 +253,9 @@ class Text_Starcraftenv_Build_In_Bot(gym.Env):
             'action_failures': self.transaction['action_failures'],
             # Telemetry-only fields; agents that do not know them ignore them.
             'game_loop': self.transaction.get('game_loop'),
-            'scripted_attack_count': self.transaction.get('scripted_attack_count', 0),
+            'scripted_attack_rule_steps': self.transaction.get('scripted_attack_rule_steps', 0),
+            'scripted_attack_order_steps': self.transaction.get('scripted_attack_order_steps', 0),
+            'scripted_attack_units_ordered': self.transaction.get('scripted_attack_units_ordered', 0),
             'replay_path': self.transaction.get('replay_path'),
         }
 
@@ -770,7 +772,9 @@ class Text_Starcraftenv_Rule_Bot(gym.Env):
             'action_failures': self.transaction['action_failures'],
             # Telemetry-only fields; agents that do not know them ignore them.
             'game_loop': self.transaction.get('game_loop'),
-            'scripted_attack_count': self.transaction.get('scripted_attack_count', 0),
+            'scripted_attack_rule_steps': self.transaction.get('scripted_attack_rule_steps', 0),
+            'scripted_attack_order_steps': self.transaction.get('scripted_attack_order_steps', 0),
+            'scripted_attack_units_ordered': self.transaction.get('scripted_attack_units_ordered', 0),
             'replay_path': self.transaction.get('replay_path'),
         }
 

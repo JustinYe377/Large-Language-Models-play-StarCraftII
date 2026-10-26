@@ -41,7 +41,8 @@ except ImportError:  # run as a plain script from this directory
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR   = Path(__file__).parent.resolve()
-LOG_ROOT     = SCRIPT_DIR / "log" / "chatgpt_log"
+# ChatGPTAgent writes to chatgpt_log (agent_type gpt/chatgpt) or deepseek_log.
+LOG_ROOTS    = [SCRIPT_DIR / "log" / "chatgpt_log", SCRIPT_DIR / "log" / "deepseek_log"]
 ANALYZER_OUT = SCRIPT_DIR / "log" / "analyzer"
 
 TARGET_STEMS = [
@@ -93,15 +94,17 @@ SLOT_EMPTY_TYPE = {
     "llm":         "llm_silent",      # the LLM itself chose EMPTY ACTION
     "padding":     "padding",
     "filter_drop": "filter_drop",
-    "queue_empty": "padding",
+    "queue_empty": "queue_empty",
 }
 
 
 def list_games():
-    if not LOG_ROOT.exists():
-        print(f"Log folder not found: {LOG_ROOT}")
+    roots = [r for r in LOG_ROOTS if r.exists()]
+    if not roots:
+        print(f"Log folder not found: {', '.join(str(r) for r in LOG_ROOTS)}")
         sys.exit(1)
-    return sorted([d for d in LOG_ROOT.iterdir() if d.is_dir()], key=lambda d: d.name)
+    return sorted([d for r in roots for d in r.iterdir() if d.is_dir() and d.name.startswith("game_")],
+                  key=lambda d: d.name)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARSE HELPERS
@@ -299,6 +302,7 @@ def analyze(df, data):
     unk     = int((df.empty_type == "unknown").sum())
     padding = int((df.empty_type == "padding").sum())
     fdrop   = int((df.empty_type == "filter_drop").sum())
+    qempty  = int((df.empty_type == "queue_empty").sum())
 
     return dict(n=n, valid=valid, empty=empty,
                 fail_events=len(all_fails), fail_steps=int(df.has_fail.sum()),
@@ -307,7 +311,7 @@ def analyze(df, data):
                 empty_runs=runs[:10], phase_stats=phase_stats,
                 avg_late_gas=avg_gas, avg_late_minerals=avg_min,
                 parse_fail=parse_f, llm_silent=silent, unk_empty=unk,
-                padding=padding, filter_drop=fdrop)
+                padding=padding, filter_drop=fdrop, queue_empty=qempty)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEXT REPORT
@@ -328,10 +332,11 @@ def write_report(r, game_name, out_path):
       f"  Valid actions executed   : {valid}  ({valid/n*100:.1f}%)",
       f"  EMPTY (no action)        : {empty}  ({empty/n*100:.1f}%)",
       f"    ├─ LLM parse failure   : {r['parse_fail']}  (LLM had action tags, extractor missed them)",
-      f"    ├─ LLM silent          : {r['llm_silent']}  (LLM produced no action tags at all)",
+      f"    ├─ LLM silent          : {r['llm_silent']}  (no action tags; with telemetry: the LLM chose EMPTY ACTION)",
       f"    ├─ Unknown             : {r['unk_empty']}  (no commander data to cross-check)",
       f"    ├─ Mix padding         : {r['padding']}  (EMPTY inserted by mix_actions; telemetry runs only)",
-      f"    └─ Filter drop         : {r['filter_drop']}  (replaced by the resource filter; telemetry runs only)",
+      f"    ├─ Filter drop         : {r['filter_drop']}  (replaced by the resource filter; telemetry runs only)",
+      f"    └─ Queue empty         : {r['queue_empty']}  (action queue ran dry; telemetry runs only)",
       f"  Steps with failures      : {r['fail_steps']}  ({r['fail_steps']/n*100:.1f}%)",
       f"  Total failure events     : {fails}", "")
 
@@ -639,14 +644,18 @@ def main():
 
     if args.list:
         print("Available game logs:")
-        for f in list_games(): print(f"  {f.name}")
+        for f in list_games(): print(f"  {f.parent.name}/{f.name}")
         return
 
     games = list_games()
     if not games:
-        print(f"No game folders found in {LOG_ROOT}"); sys.exit(1)
+        print(f"No game folders found in {', '.join(str(r) for r in LOG_ROOTS)}"); sys.exit(1)
 
-    folder = (LOG_ROOT / args.game_folder) if args.game_folder else games[-1]
+    if args.game_folder:
+        matches = [g for g in games if g.name == args.game_folder]
+        folder = matches[-1] if matches else LOG_ROOTS[0] / args.game_folder
+    else:
+        folder = games[-1]
     if not folder.exists():
         print(f"ERROR: {folder} not found")
         print("Available:"); [print(f"  {g.name}") for g in games]

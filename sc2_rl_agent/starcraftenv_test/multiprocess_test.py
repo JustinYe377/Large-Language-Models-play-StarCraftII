@@ -3,8 +3,8 @@ from datetime import datetime
 import argparse
 import multiprocessing
 import copy
-import wandb
 from sc2_rl_agent.starcraftenv_test.worker import *
+from sc2_rl_agent.starcraftenv_test.telemetry.cli import add_telemetry_args
 from sc2_rl_agent.starcraftenv_test.utils.action_info import ActionDescriptions
 from sc2_rl_agent.starcraftenv_test.config.config import LADDER_MAP_2023, DIFFICULTY_LEVELS,AI_BUILD_LEVELS
 
@@ -88,6 +88,8 @@ if __name__ == '__main__':
                         choices=['macro', 'rush'],
                         help="Commander strategy. 'macro' = standard nexus-first into "
                              "tech (default). 'rush' = 4-Gate Stalker all-in.")
+    # Each ChatGPT worker process records its own telemetry run (named ...-p<id>).
+    add_telemetry_args(parser)
     original_args = parser.parse_args()
 
     # Make sure replay folder exists so workers can write into it.

@@ -24,7 +24,7 @@ from collections import Counter, deque
 
 import numpy as np
 
-from .schema import SCHEMA_VERSION, EMPTY_ACTION_NAME, ATTACK_ACTION_NAME
+from .schema import SCHEMA_VERSION, EMPTY_ACTION_NAME, ATTACK_ACTION_NAME, SCRIPTED_ATTACK_KEYS
 from .funnel import FunnelCounter, fail_cat
 from .game_metrics import extract_metrics, GameMetricsTracker
 
@@ -58,6 +58,16 @@ def resolve_mode(cli_mode=None):
         warnings.warn(f"[telemetry] unknown wandb mode {mode!r}; using disabled")
         mode = "disabled"
     return mode
+
+
+NORMAL_RESULTS = ("Victory", "Defeat", "Tie")
+
+
+def exit_code_for(result):
+    """0 for a finished game, 130 (SIGINT convention) for Ctrl+C, else 1."""
+    if result in NORMAL_RESULTS:
+        return 0
+    return 130 if result == "aborted" else 1
 
 
 def normalize_result(result):
@@ -136,8 +146,8 @@ class RunLogger:
         self._recent_latency = deque(maxlen=10)
         self.model_resolved = None
         self.time_to_first_attack_s = None
-        self.scripted_attack_count = 0
-        self.scripted_attack_first_s = None
+        self.scripted_attack = {k: 0 for k in SCRIPTED_ATTACK_KEYS}
+        self.scripted_attack_first_order_s = None
         self.replay_path = None
         self._last_game_log_t = None
         self._last_game_time_s = 0.0
@@ -315,6 +325,8 @@ class RunLogger:
             "funnel/tick_parse_rate": tick.n_parsed / tick.k_requested if tick.k_requested else 0.0,
             "funnel/tick_n_queued_real": tick.n_queued_real,
             "funnel/tick_n_padding": tick.n_padding,
+            "funnel/tick_n_filter_drop_slots": tick.n_filter_drop_slots,
+            "funnel/tick_n_nonreal_slots": tick.n_nonreal_slots,
             "funnel/tick_n_truncated": tick.n_truncated,
         })
         if attempts:
@@ -357,11 +369,7 @@ class RunLogger:
         for f in failures:
             self.fail_cats[fail_cat(str(f))] += 1
         extra = dict(extra or {})
-        sac = extra.get("scripted_attack_count")
-        if isinstance(sac, int):
-            if sac > 0 and self.scripted_attack_first_s is None:
-                self.scripted_attack_first_s = game_time_s
-            self.scripted_attack_count = max(self.scripted_attack_count, sac)
+        self.update_scripted_attack(extra, game_time_s)
         if extra.get("replay_path"):
             self.replay_path = extra["replay_path"]
 
@@ -379,6 +387,15 @@ class RunLogger:
             data = {"game_time_s": game_time_s}
             data.update({f"game/{k}": v for k, v in metrics.items()})
             self._wb(lambda r: r.log(data))
+
+    def update_scripted_attack(self, values, game_time_s=None):
+        """Counters are cumulative in the bot, so keep the max seen."""
+        for k in SCRIPTED_ATTACK_KEYS:
+            v = values.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                self.scripted_attack[k] = max(self.scripted_attack[k], v)
+        if self.scripted_attack["scripted_attack_order_steps"] > 0 and self.scripted_attack_first_order_s is None:
+            self.scripted_attack_first_order_s = game_time_s
 
     def log_event(self, kind, **payload):
         self._write("event", kind, payload)
@@ -443,8 +460,8 @@ class RunLogger:
             "model_requested": self.config.get("model_requested"),
             "model_resolved": self.model_resolved,
             "time_to_first_attack_s": self.time_to_first_attack_s,
-            "scripted_attack_count": self.scripted_attack_count,
-            "scripted_attack_first_s": self.scripted_attack_first_s,
+            **self.scripted_attack,
+            "scripted_attack_first_order_s": self.scripted_attack_first_order_s,
             "replay_path": self.replay_path,
             "schema_version": SCHEMA_VERSION,
         }
@@ -520,9 +537,10 @@ class RunLogger:
         # lets the artifact and run.finish() go through.
         run = self._run
         if run is not None:
-            exit_code = 0 if summary.get("result") in ("Victory", "Defeat", "Tie") else 1
-            for step in (lambda r: r.summary.update(summary), self._log_tables,
-                         self._log_artifact, lambda r: r.finish(exit_code=exit_code)):
+            result = summary.get("result")
+            for step in (lambda r: r.summary.update(summary), lambda r: self._tag_result(r, result),
+                         self._log_tables, self._log_artifact,
+                         lambda r: r.finish(exit_code=exit_code_for(result))):
                 try:
                     step(run)
                 except Exception as e:
@@ -532,11 +550,19 @@ class RunLogger:
         self.close()
         return summary
 
+    @staticmethod
+    def _tag_result(run, result):
+        """wandb has no "aborted" state, so abnormal endings are also added as
+        a run tag (aborted / crash / unknown) to make them filterable."""
+        if result not in NORMAL_RESULTS:
+            run.tags = tuple(run.tags or ()) + (str(result),)
+
     def _log_tables(self, run):
         wb = self._wandb
         tick_cols = ["tick_id", "game_step", "game_time_s", "call_id", "parse_tier", "k_requested",
                      "n_parsed", "n_unique_parsed", "n_after_filter", "n_filter_dropped",
-                     "n_queued_real", "n_padding", "n_truncated", "llm_error",
+                     "n_queued_real", "n_padding", "n_filter_drop_slots", "n_parse_empty_slots",
+                     "n_nonreal_slots", "n_truncated", "llm_error",
                      "proposed_action_ids", "queued_action_ids", "command_preview"]
         ticks = wb.Table(columns=tick_cols, data=[
             [str(getattr(t, c)) if isinstance(getattr(t, c), list) else getattr(t, c) for c in tick_cols]
