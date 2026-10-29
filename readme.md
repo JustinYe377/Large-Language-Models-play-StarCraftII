@@ -205,6 +205,63 @@ To use OpenAI/GPT-3.5 as in the original paper, set `--LLM_model_name gpt-3.5-tu
 
 ---
 
+## Running headless on a Linux server
+
+Games can run on a Linux machine with no display. This uses Blizzard's official headless Linux build, which opens no window and renders nothing. Each game produces its logs, telemetry and `.SC2Replay` in `log/<agent>_log/game_<time>_<pid>/`, and you monitor runs through wandb.
+
+**1. Install SC2 and the maps** (one time):
+
+```bash
+scripts/setup_linux_sc2.sh --accept-eula      # SC2 4.10 into ~/StarCraftII + the 6 maps in Maps/
+```
+
+`--accept-eula` accepts [Blizzard's AI and Machine Learning License](https://blzdistsc2-a.akamaihd.net/AI_AND_MACHINE_LEARNING_LICENSE.html); without it the script will not download anything. Set `SC2PATH=/other/dir` to install elsewhere. The script is safe to re-run.
+
+**2. Create a clean Python env:**
+
+```bash
+conda create -n textsc2 python=3.10 -y
+export PYTHONNOUSERSITE=1                     # keep ~/.local packages out (see below)
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu   # optional, CPU-only machines
+pip install -r requirements-linux.txt
+```
+
+`PYTHONNOUSERSITE=1` matters if `~/.local` holds an old `sc2` package (python-sc2 0.11.x). That package shadows `burnysc2`, which this code needs, and its outdated protobuf files fail to import with protobuf ≥ 4. Keep the variable set whenever you run the project.
+
+**3. Run a game:**
+
+```bash
+export PYTHONNOUSERSITE=1 WANDB_API_KEY=...   # WANDB_API_KEY replaces interactive `wandb login`
+python -m sc2_rl_agent.starcraftenv_test.test_the_env \
+    --agent_type deepseek --difficulty Harder \
+    --sc2_platform Linux --sc2_path ~/StarCraftII \
+    --LLM_api_base http://localhost:8000/v1 --LLM_model_name <served-model-name> --LLM_api_key x \
+    --wandb_mode online --exp_group <experiment>
+```
+
+- **Local models.** Any OpenAI-compatible server works (vLLM, SGLang, Ollama, LM Studio). Point `--LLM_api_base` at it and use the model name it serves. Keys shorter than 8 characters, like `x`, are treated as placeholders and are not scrubbed from logs. DeepSeek-only fields such as cache hits are recorded as `null`.
+- **Choosing the SC2 build.** `--sc2_platform Linux` selects the headless build and overrides a shell `SC2PF` (for example `SC2PF=WSL2`, which launches the Windows client with a window). On a plain Linux server burnysc2 already defaults to Linux and `~/StarCraftII`, so both flags are optional there. Under WSL, burnysc2 would silently turn `Linux` back into `WSL2`, and a WSL setup for the Windows client usually exports `SC2CLIENTHOST`/`SC2SERVERHOST` pointing at the Windows host. So `--sc2_platform Linux` also sets `SC2_WSL_DETECT=0` and both hosts to `127.0.0.1`. The script checks that the binary and the chosen map exist before starting.
+- **Crashes.** If the SC2 process dies before the game ends (for example SC2 fails to launch), the run stops within about a second with an error and is recorded as `result=crash`; before this change it waited forever.
+- **Optional game controls.** `--game_time_limit <seconds>` ends a game as a Tie at that in-game time. `--random_seed <n>` makes SC2's randomness reproducible. Both default to off.
+- **Long runs.** Start games under `tmux`/`nohup`. Ctrl+C still closes the wandb run (`result=aborted`).
+
+**Smoke test without a model.** `tests/mock_llm_server.py` is an OpenAI-compatible stand-in that answers every request with K random valid actions. Use it to check SC2, logging, replays and wandb on a new machine before spending tokens or GPU time:
+
+```bash
+python -m sc2_rl_agent.starcraftenv_test.tests.mock_llm_server --port 18000 &
+python -m sc2_rl_agent.starcraftenv_test.test_the_env --agent_type deepseek --difficulty VeryEasy \
+    --sc2_platform Linux --LLM_api_base http://127.0.0.1:18000/v1 --LLM_model_name mock-model \
+    --LLM_api_key x --wandb_mode offline --game_time_limit 480
+```
+
+**Caveats**
+
+- **Different game version.** The Linux build is SC2 **4.10** (2019); the Windows client is 5.0.x. Unit stats and balance differ, so do not compare or mix results across the two. The run config records `sc2_platform`, `sc2_base_build` and the running `sc2_version`, so wandb can filter on them.
+- **Replays.** Replays are 4.10 replays. Watch them on a client that can play that version.
+- **Action vector DB.** `utils/actionvdb/` is not in git. A new machine starts with an empty `protoss_actions` collection, which is also what the existing local DB contains, so extractor tier 4 (vector-DB fallback) never matches anything on either. The run config records this as `action_vdb_size`.
+
+---
+
 ## Run demo
 
 ### Game modes

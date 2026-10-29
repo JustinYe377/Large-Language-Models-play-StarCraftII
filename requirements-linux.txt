@@ -1,0 +1,32 @@
+# Headless Linux runtime for test_the_env.py (see README "Running headless on a Linux server").
+# Python 3.10. Install into a fresh env and run with PYTHONNOUSERSITE=1 so packages in
+# ~/.local (e.g. the old `sc2` 0.11.2, which shadows burnysc2) cannot leak in.
+#
+# torch is pulled in by sentence-transformers. On a CPU-only machine install the small
+# CPU wheel first:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+
+# StarCraft II API
+burnysc2==7.3.0
+
+# Agent / env
+numpy==2.2.6
+gym==0.26.2
+nest-asyncio==1.5.7
+openai==2.54.0
+
+# Action vector DB (extractor tier 4)
+chromadb==0.4.13
+sentence-transformers==2.2.2
+transformers==4.34.0
+tokenizers==0.14.1
+huggingface-hub==0.17.3
+torch==2.6.0
+
+# Telemetry
+wandb==0.30.0
+
+# Analyzer and tests
+pandas==2.2.2
+matplotlib==3.10.0
+pytest==7.0.1

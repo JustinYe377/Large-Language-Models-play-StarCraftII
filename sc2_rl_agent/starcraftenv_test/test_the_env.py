@@ -1,3 +1,9 @@
+# Must run before anything imports sc2: selects headless Linux vs Windows SC2.
+from sc2_rl_agent.starcraftenv_test.sc2_runtime import (
+    apply_sc2_runtime_args, add_sc2_runtime_args, add_game_run_args, check_install,
+)
+apply_sc2_runtime_args()
+
 from datetime import datetime
 
 import argparse
@@ -45,6 +51,9 @@ def agent_test(agent, env):
 
 
 def initialize_and_test_agent(args):
+    sc2_info = check_install(args.map_pool[args.map_idx])
+    print(f"[test_the_env] SC2 {sc2_info}")
+
     # 初始化环境
     selector = StarCraftEnvSelector(args)
     env = selector.create_env()
@@ -189,6 +198,8 @@ if __name__ == '__main__':
     parser.set_defaults(real_time=False)
 
     add_telemetry_args(parser)
+    add_sc2_runtime_args(parser)
+    add_game_run_args(parser)
 
     # Commander strategy: 'macro' (default) or 'rush' (4-Gate Stalker all-in).
     parser.add_argument('--strategy', type=str, default='macro',

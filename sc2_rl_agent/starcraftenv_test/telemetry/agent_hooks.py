@@ -15,7 +15,7 @@ from .llm_meter import LLMMeter
 from .run_logger import RunLogger, resolve_mode, COMMAND_PREVIEW_CHARS
 from .schema import SCRIPTED_ATTACK_KEYS
 
-OBS_EXTRA_KEYS = ("game_loop", "replay_path") + SCRIPTED_ATTACK_KEYS
+OBS_EXTRA_KEYS = ("game_loop", "replay_path", "sc2_game_version") + SCRIPTED_ATTACK_KEYS
 
 
 def _safe(default=None):
@@ -61,6 +61,13 @@ class AgentTelemetry:
         """Build telemetry for a ChatGPTAgent. Never raises; returns a
         disabled instance if anything goes wrong."""
         try:
+            try:
+                # Size of the action vector DB used by extractor tier 4; an empty
+                # collection means that tier can never match anything.
+                extra_config = dict(extra_config,
+                                    action_vdb_size=agent.action_db_manager.manager.collection.count())
+            except Exception:
+                pass
             logger = getattr(args, "run_logger", None)
             if logger is None:
                 if hasattr(args, "wandb_mode"):

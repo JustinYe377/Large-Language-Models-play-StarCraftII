@@ -223,8 +223,17 @@ class Text_Starcraftenv_Build_In_Bot(gym.Env):
                 self.transaction['output_command_flag'] = False
 
         # 等待游戏结束或准备好下一步。
+        next_alive_check = time.monotonic() + 1.0
         while not (self.done_event.is_set() or self.isReadyForNextStep.is_set()):
             time.sleep(0.0001)
+            # If the SC2 bot process died without finishing the game (e.g. SC2
+            # failed to launch), fail instead of waiting forever.
+            if time.monotonic() >= next_alive_check:
+                next_alive_check += 1.0
+                if (self.p is not None and not self.p.is_alive()
+                        and not (self.done_event.is_set() or self.isReadyForNextStep.is_set())):
+                    raise RuntimeError(f"SC2 bot process exited (exit code {self.p.exitcode}) "
+                                       f"before the game finished; see its traceback above")
 
         # 如果游戏结束，则清除相关事件并设置奖励。
         if self.done_event.is_set():
@@ -257,6 +266,7 @@ class Text_Starcraftenv_Build_In_Bot(gym.Env):
             'scripted_attack_order_steps': self.transaction.get('scripted_attack_order_steps', 0),
             'scripted_attack_units_ordered': self.transaction.get('scripted_attack_units_ordered', 0),
             'replay_path': self.transaction.get('replay_path'),
+            'sc2_game_version': self.transaction.get('sc2_game_version'),
         }
 
         # 确保每个状态的部分都是可序列化的。
@@ -481,8 +491,17 @@ class Text_Starcraftenv_VS_Human(gym.Env):
                 self.transaction['output_command_flag'] = False
 
         # 等待游戏结束或准备好下一步。
+        next_alive_check = time.monotonic() + 1.0
         while not (self.done_event.is_set() or self.isReadyForNextStep.is_set()):
             time.sleep(0.0001)
+            # If the SC2 bot process died without finishing the game (e.g. SC2
+            # failed to launch), fail instead of waiting forever.
+            if time.monotonic() >= next_alive_check:
+                next_alive_check += 1.0
+                if (self.p is not None and not self.p.is_alive()
+                        and not (self.done_event.is_set() or self.isReadyForNextStep.is_set())):
+                    raise RuntimeError(f"SC2 bot process exited (exit code {self.p.exitcode}) "
+                                       f"before the game finished; see its traceback above")
 
         # 如果游戏结束，则清除相关事件并设置奖励。
         if self.done_event.is_set():
@@ -742,8 +761,17 @@ class Text_Starcraftenv_Rule_Bot(gym.Env):
                 self.transaction['output_command_flag'] = False
 
         # 等待游戏结束或准备好下一步。
+        next_alive_check = time.monotonic() + 1.0
         while not (self.done_event.is_set() or self.isReadyForNextStep.is_set()):
             time.sleep(0.0001)
+            # If the SC2 bot process died without finishing the game (e.g. SC2
+            # failed to launch), fail instead of waiting forever.
+            if time.monotonic() >= next_alive_check:
+                next_alive_check += 1.0
+                if (self.p is not None and not self.p.is_alive()
+                        and not (self.done_event.is_set() or self.isReadyForNextStep.is_set())):
+                    raise RuntimeError(f"SC2 bot process exited (exit code {self.p.exitcode}) "
+                                       f"before the game finished; see its traceback above")
 
         # 如果游戏结束，则清除相关事件并设置奖励。
         if self.done_event.is_set():
@@ -776,6 +804,7 @@ class Text_Starcraftenv_Rule_Bot(gym.Env):
             'scripted_attack_order_steps': self.transaction.get('scripted_attack_order_steps', 0),
             'scripted_attack_units_ordered': self.transaction.get('scripted_attack_units_ordered', 0),
             'replay_path': self.transaction.get('replay_path'),
+            'sc2_game_version': self.transaction.get('sc2_game_version'),
         }
 
         # 确保每个状态的部分都是可序列化的。

@@ -2000,6 +2000,15 @@ class Protoss_Bot(BotAI):
             else:
                 self.Location = 1
 
+        # Telemetry: record the SC2 build actually running (4.10 on Linux, 5.0.x on Windows).
+        if iteration == 0:
+            try:
+                ping = await self.client.ping()
+                with self.lock:
+                    self.transaction['sc2_game_version'] = ping.ping.game_version
+            except Exception as e:
+                print(f"[telemetry] could not read SC2 version: {e}")
+
         # 获取信息
         information = self.get_information()
         await self.defend()
@@ -2177,7 +2186,9 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
                       [Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep)),
                        Computer(map_race(opposite_race), map_difficulty(difficulty), map_ai_build(args.ai_build))],
                       realtime=args.real_time,
-                      save_replay_as=temp_replay_path)
+                      save_replay_as=temp_replay_path,
+                      game_time_limit=getattr(args, 'game_time_limit', None),
+                      random_seed=getattr(args, 'random_seed', None))
 
     # 游戏结束后重命名重放文件
     final_replay_path = f'{replay_folder}/{args.current_time}_{map}_player_race_PROTOSS_VS_BUILD_IN_AI_{difficulty}_{opposite_race}_process_{process_id}_{result}.SC2Replay'
@@ -2216,7 +2227,9 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
                       [Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep)),
                        Bot(map_race(opposite_race), map_rule_bot(opposite_bot))],
                       realtime=args.real_time,
-                      save_replay_as=temp_replay_path)
+                      save_replay_as=temp_replay_path,
+                      game_time_limit=getattr(args, 'game_time_limit', None),
+                      random_seed=getattr(args, 'random_seed', None))
 
     final_replay_path = f'{replay_folder}/{args.current_time}_{map}_player_race_PROTOSS_VS_RULE_AI_{opposite_bot}_{opposite_race}_process_{process_id}_{result}.SC2Replay'
     os.rename(temp_replay_path, final_replay_path)

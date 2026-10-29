@@ -37,6 +37,9 @@ COMMAND_PREVIEW_CHARS = 500
 
 # Placeholder defaults that are not real secrets.
 _FAKE_KEYS = {"", "your-api-key", "your-key", "none", "empty"}
+# Keys shorter than this (e.g. "x" or "token" for a local vLLM/Ollama server)
+# are not treated as secrets: scrubbing them would corrupt every log line.
+MIN_SECRET_LEN = 8
 
 FILES = {
     "llm_call": "llm_calls.jsonl",
@@ -131,7 +134,8 @@ class RunLogger:
         self.finished = False
 
         key = getattr(args, "LLM_api_key", None)
-        self._secrets = [key] if isinstance(key, str) and key.strip().lower() not in _FAKE_KEYS else []
+        self._secrets = ([key] if isinstance(key, str) and len(key.strip()) >= MIN_SECRET_LEN
+                         and key.strip().lower() not in _FAKE_KEYS else [])
 
         self._files = {}
         self.funnel = FunnelCounter(rolling_ticks=10)
@@ -188,6 +192,14 @@ class RunLogger:
             "platform": platform.platform(),
             "schema_version": SCHEMA_VERSION,
         })
+        if self.job_type == "game":
+            # Which SC2 build/platform this machine launches (headless Linux 4.10
+            # vs Windows 5.0.x give different balance, so results must not mix).
+            try:
+                from ..sc2_runtime import runtime_info
+                cfg.update(runtime_info())
+            except Exception as e:
+                print(f"[telemetry] could not read SC2 runtime info: {e}")
         map_pool, map_idx = getattr(self.args, "map_pool", None), getattr(self.args, "map_idx", None)
         if "map" not in extra and isinstance(map_pool, (list, tuple)) and isinstance(map_idx, int):
             try:
@@ -370,6 +382,10 @@ class RunLogger:
             self.fail_cats[fail_cat(str(f))] += 1
         extra = dict(extra or {})
         self.update_scripted_attack(extra, game_time_s)
+        version = extra.pop("sc2_game_version", None)
+        if version and self.config.get("sc2_version") != version:
+            self.config["sc2_version"] = version
+            self._wb(lambda r: r.config.update({"sc2_version": version}, allow_val_change=True))
         if extra.get("replay_path"):
             self.replay_path = extra["replay_path"]
 
