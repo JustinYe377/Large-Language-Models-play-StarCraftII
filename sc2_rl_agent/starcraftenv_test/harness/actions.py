@@ -2,9 +2,11 @@
 Protoss action specs: prerequisites, costs and a legality check.
 
 legal_actions(state) is the action mask: an action is offered to the model
-only if its prerequisites exist right now. Resource affordability is NOT
-masked here (the resource filter still handles it), because the queue
-executes over the next steps while income keeps arriving.
+only if its prerequisites exist right now and the bot would actually act on
+it (capacity.py: busy buildings, the bot's pylon/limit rules, ...).
+Resource affordability is NOT masked here (the resource filter still handles
+it), because the queue executes over the next steps while income keeps
+arriving.
 """
 
 from dataclasses import dataclass, field
@@ -13,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from sc2_rl_agent.starcraftenv_test.utils.action_info import ActionDescriptions
 from sc2_rl_agent.starcraftenv_test.utils.resource_filter import PROTOSS_ACTION_COSTS
 
+from .capacity import capacity_reason
 from .state import GameState
 
 GATEWAY_LIKE = ("gateway", "warp_gate")
@@ -114,8 +117,9 @@ def _build_specs() -> Dict[int, ActionSpec]:
         S(29, "BUILD DARKSHRINE", requires=("pylon", "twilight_council")),
         S(30, "BUILD ROBOTICSBAY", requires=("pylon", "robotics_facility")),
         S(31, "BUILD FLEETBEACON", requires=("pylon", "stargate")),
-        S(32, "BUILD PHOTONCANNON", requires=("pylon", "forge")),
-        S(33, "BUILD SHIELDBATTERY", requires=("pylon", "cybernetics_core")),
+        # The bot requires both forge and cybernetics core for cannons and batteries.
+        S(32, "BUILD PHOTONCANNON", requires=("pylon", "forge", "cybernetics_core")),
+        S(33, "BUILD SHIELDBATTERY", requires=("pylon", "forge", "cybernetics_core")),
         # --- research ---
         S(34, "RESEARCH WARPGATERESEARCH", requires=("cybernetics_core",), research_key="warpgate"),
         *_upgrade_line(35, "RESEARCH PROTOSSAIRWEAPONSLEVEL{}", "protoss_air_weapon_level_{}",
@@ -177,8 +181,10 @@ def illegal_reason(spec: ActionSpec, s: GameState) -> Optional[str]:
     if spec.after_research and s.research_state(spec.after_research) != "done":
         return f"needs {spec.after_research} first"
     if spec.check:
-        return spec.check(s)
-    return None
+        reason = spec.check(s)
+        if reason:
+            return reason
+    return capacity_reason(spec.id, spec.name, s)
 
 
 def legal_actions(s: GameState) -> Dict[int, Optional[str]]:

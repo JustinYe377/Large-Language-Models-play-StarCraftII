@@ -322,7 +322,7 @@ AI_BUILD_LEVELS = ['randombuild', 'rush', 'timing', 'power', 'macro', 'air']
 | Hidden reasoning | server default (DeepSeek: on, ~5k tokens per decision) | off by default (`--LLM_thinking disabled`) |
 | Input | five near-identical L1 summaries + raw executed/failed lists | one state snapshot, changes since the last decision, deduplicated outcomes with failure reasons, and the model's own `plan` from last turn |
 | Prompt layout | | static system prompt (rules + full action catalog with costs and prerequisites) first and identical every call, so it is served from the prefix cache; everything dynamic goes in the user message |
-| Action masking | none | only actions whose prerequisites exist are listed as legal; others are discarded (`n_illegal_dropped`) and reported back to the model next turn |
+| Action masking | none | an action is listed as legal only if its prerequisites exist **and** the bot would act on it right now (`harness/capacity.py`, which mirrors the bot's handler rules: pylon thresholds, one research per building, busy robotics/stargate, chrono only on a busy target, time-window building limits, warp-gate unit whitelist). Others are discarded (`n_illegal_dropped`) and reported back next turn. Probes are deliberately not masked while every Nexus is busy: the queued slot runs a few steps later, and masking cut probe production in an A/B game. |
 
 The tool schema itself never changes during a game: it only bounds ids to the action vocabulary. The per-turn legal set travels in the user message, so the cached prefix, which includes the tool definition, is never invalidated.
 
