@@ -17,6 +17,7 @@ from sc2.player import Bot, Computer, Human
 from sc2.position import Point2
 from sc2_rl_agent.starcraftenv_test.utils.action_info import ActionDescriptions
 from sc2_rl_agent.starcraftenv_test.utils.path_utils import agent_log_dir_name
+from sc2_rl_agent.starcraftenv_test.env.bot.version import BOT_VERSION, BOT_RULES
 from ...config.config import map_difficulty, map_race, map_rule_bot, map_ai_build
 from collections import Counter
 
@@ -45,8 +46,33 @@ SCOUTING_INTERVAL = 300
 # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
+# Action id per structure, for failure reports from handle_action_build_building.
+BUILD_ACTION_ID = {
+    UnitTypeId.GATEWAY: 22, UnitTypeId.CYBERNETICSCORE: 23, UnitTypeId.FORGE: 24,
+    UnitTypeId.TWILIGHTCOUNCIL: 25, UnitTypeId.ROBOTICSFACILITY: 26, UnitTypeId.STARGATE: 27,
+    UnitTypeId.TEMPLARARCHIVE: 28, UnitTypeId.DARKSHRINE: 29, UnitTypeId.ROBOTICSBAY: 30,
+    UnitTypeId.FLEETBEACON: 31, UnitTypeId.PHOTONCANNON: 32, UnitTypeId.SHIELDBATTERY: 33,
+}
+
+# Warp-in ability per unit (adept uses a different ability family).
+WARP_ABILITY = {
+    UnitTypeId.ZEALOT: AbilityId.WARPGATETRAIN_ZEALOT,
+    UnitTypeId.STALKER: AbilityId.WARPGATETRAIN_STALKER,
+    UnitTypeId.SENTRY: AbilityId.WARPGATETRAIN_SENTRY,
+    UnitTypeId.ADEPT: AbilityId.TRAINWARP_ADEPT,
+    UnitTypeId.HIGHTEMPLAR: AbilityId.WARPGATETRAIN_HIGHTEMPLAR,
+    UnitTypeId.DARKTEMPLAR: AbilityId.WARPGATETRAIN_DARKTEMPLAR,
+}
+
+
 class Protoss_Bot(BotAI):
-    def __init__(self, transaction, lock, isReadyForNextStep):
+    def __init__(self, transaction, lock, isReadyForNextStep, bot_rules="dynamic"):
+        if bot_rules not in BOT_RULES:
+            raise ValueError(f"bot_rules must be one of {BOT_RULES}")
+        # "dynamic": no hard-coded strategy (time-window building limits, the
+        # 12:00 attack, the fixed pylon threshold); "legacy": original rules.
+        self.bot_rules = bot_rules
+        self.scout_tags = set()
         self.iteration = 0
         self.lock = lock
         self.transaction = transaction
@@ -234,25 +260,26 @@ class Protoss_Bot(BotAI):
         例如，{"00:00-02:00": 1}表示在0:00到2:00之间只允许建造1个建筑。
 
         """
-        # 如果无法负担费用，则直接返回
+        # v2: every early exit is reported as a failure (v1 returned silently,
+        # so a skipped build looked like a success to the agent).
+        action_id = BUILD_ACTION_ID.get(building_type)
         if not self.can_afford(building_type):
-            print(f"Cannot afford {building_type}")
-            return
+            return self.record_failure(action_id, f'Cannot afford {building_type.name}')
 
         current_time = self.time_formatted  # 获取当前游戏时间
 
-        # 如果提供了建筑限制，并且当前时间在限制的范围内
-        if building_limits:
+        # Time-window count limits are a hard-coded strategy: legacy rules only.
+        if building_limits and self.bot_rules == "legacy":
             for time_range, limit in building_limits.items():
                 start_time, end_time = time_range.split('-')
                 if start_time <= current_time <= end_time:
-                    # 计算当前已有的相同类型建筑的数量（包括正在建造的）
+                    # 计算当前已有的相同类型建筑的数量（包括正在建造的）; warp gates count as gateways
                     current_building_count = self.structures(building_type).amount + self.already_pending(building_type)
-
-                    # 如果当前建筑数量已达到或超过此时间段的限制，则不建造
+                    if building_type == UnitTypeId.GATEWAY:
+                        current_building_count += self.structures(UnitTypeId.WARPGATE).amount
                     if current_building_count >= limit:
-                        print(f"Building limit reached for {building_type} for the time range {time_range}.")
-                        return
+                        return self.record_failure(
+                            action_id, f'Limit of {limit} {building_type.name} until {end_time} (legacy rules)')
 
         # --- 以下是寻找建筑位置和发起建造的代码，与原先保持一致 ---
 
@@ -268,8 +295,7 @@ class Protoss_Bot(BotAI):
         else:
             best_base = self.find_best_base_for_building(building_type)
             if not best_base:
-                print(f"No suitable base found for {building_type}")
-                return
+                return self.record_failure(action_id, f'No suitable base found for {building_type.name}')
 
             # 优先找到最佳位置
             best_position = self.find_optimal_building_position_for_base(best_base, building_type=building_type)
@@ -303,10 +329,10 @@ class Protoss_Bot(BotAI):
                                                                                  building_type=building_type)
 
         if not best_position:
-            print(f"Still no suitable position found for {building_type}. Aborting.")
-            return
+            return self.record_failure(action_id, f'No placement found for {building_type.name}')
 
-        await self.build(building_type, near=best_position)
+        if not await self.build(building_type, near=best_position):
+            return self.record_failure(action_id, f'Could not start building {building_type.name}')
         print(f"Building {building_type}")
 
     def is_position_blocking_resources(self, position: Point2) -> bool:
@@ -747,9 +773,15 @@ class Protoss_Bot(BotAI):
         :param unit_type: 用于侦查的单位类型。
         :param action_id: 动作ID，用于记录失败原因。
         """
-        # 检查从上次侦查开始是否已经过了指定的间隔
-        if self.iteration - self.last_scouting_iteration < SCOUTING_INTERVAL:
-            return
+        if self.bot_rules == "legacy":
+            # 检查从上次侦查开始是否已经过了指定的间隔 (v2: reported instead of silent)
+            if self.iteration - self.last_scouting_iteration < SCOUTING_INTERVAL:
+                return self.record_failure(action_id, 'Scouted recently; wait before scouting again')
+        else:
+            alive = {u.tag for u in self.units} & self.scout_tags
+            self.scout_tags = alive
+            if alive:
+                return self.record_failure(action_id, 'A scout is already out')
 
         # 如果没有可用的侦查单位，则记录失败并返回
         if not self.units(unit_type).exists:
@@ -764,8 +796,12 @@ class Protoss_Bot(BotAI):
         # 定位侦查位置，这里简单地选择敌方的起始位置
         target_location = self.enemy_start_locations[0]
 
-        # 发出侦查命令
-        scout_unit.attack(target_location)
+        # 发出侦查命令 (probes move instead of attacking so they do not stop to fight)
+        if unit_type == UnitTypeId.PROBE:
+            scout_unit.move(target_location)
+        else:
+            scout_unit.attack(target_location)
+        self.scout_tags.add(scout_unit.tag)
 
         # 更新上次侦查的迭代次数
         self.last_scouting_iteration = self.iteration
@@ -795,32 +831,34 @@ class Protoss_Bot(BotAI):
             if success:
                 print(f'训练{unit_type.name}')
 
+    async def _research_at(self, action_id, structure_type, upgrade_id, ability_id, description, label):
+        """v2: research at an idle building of `structure_type`. Reports one
+        precise failure reason, and nothing on success (v1 also reported a
+        failure after a successful research order)."""
+        structures = self.structures(structure_type)
+        if not structures.exists:
+            return self.record_failure(action_id, f'{label} does not exist')
+        if not structures.ready.exists:
+            return self.record_failure(action_id, f'{label} is not ready')
+        if self.already_pending_upgrade(upgrade_id) != 0:
+            return self.record_failure(action_id, f'{description} is already researched or in progress')
+        idle = structures.ready.idle
+        if not idle.exists:
+            return self.record_failure(action_id, f'{label} is busy researching')
+        if not self.can_afford(upgrade_id):
+            return self.record_failure(action_id, f'Cannot afford {description}')
+        building = idle.first
+        abilities = await self.get_available_abilities(building)
+        if ability_id not in abilities:
+            return self.record_failure(action_id, f'{description} is not available yet (missing prerequisite)')
+        building.research(upgrade_id)
+        print(description)
+        return True
+
     async def research_air_upgrade(self, action_id, upgrade_id, ability_id, description):
         print(f'action={action_id}')
-
-        # 前置条件检查
-        if not self.structures(UnitTypeId.PYLON).exists:
-            return self.record_failure(action_id, 'Pylon does not exist')
-
-        if not self.structures(UnitTypeId.NEXUS).exists:
-            return self.record_failure(action_id, 'Nexus does not exist')
-
-        if not self.structures(UnitTypeId.CYBERNETICSCORE).exists:
-            return self.record_failure(action_id, 'Cybernetics Core does not exist')
-
-        # 获取随机的CYBERNETICSCORE实例
-        by = self.structures(UnitTypeId.CYBERNETICSCORE).random
-        abilities = await self.get_available_abilities(by)
-
-        # 检查是否可以研究指定的升级
-        if self.structures(UnitTypeId.CYBERNETICSCORE).ready and self.already_pending(upgrade_id) == 0:
-            if self.can_afford(upgrade_id) and self.structures(
-                    UnitTypeId.CYBERNETICSCORE).idle.exists and ability_id in abilities:
-                by = self.structures(UnitTypeId.CYBERNETICSCORE).idle.random
-                by.research(upgrade_id)
-                print(description)
-
-        return self.record_failure(action_id, f'Cannot afford {description} or Cybernetics Core is not idle')
+        return await self._research_at(action_id, UnitTypeId.CYBERNETICSCORE, upgrade_id, ability_id, description,
+                                       'Cybernetics Core')
 
     async def build_pylon_time_period(self, action_id, supply_threshold, pending_threshold, location_multiplier):
         if self.supply_left <= supply_threshold and self.already_pending(
@@ -836,49 +874,13 @@ class Protoss_Bot(BotAI):
 
     async def research_upgrade(self, action_id, upgrade_id, ability_id, description):
         print(f'action={action_id}')
-
-        # 前置条件检查
-        if not self.structures(UnitTypeId.PYLON).exists:
-            return self.record_failure(action_id, 'Pylon does not exist')
-
-        if not self.structures(UnitTypeId.NEXUS).exists:
-            return self.record_failure(action_id, 'Nexus does not exist')
-
-        if not self.structures(UnitTypeId.CYBERNETICSCORE).exists:
-            return self.record_failure(action_id, 'Cybernetics Core does not exist')
-
-        # 获取随机的CYBERNETICSCORE实例
-        by = self.structures(UnitTypeId.CYBERNETICSCORE).random
-        abilities = await self.get_available_abilities(by)
-
-        # 检查是否可以研究指定的升级
-        if self.structures(UnitTypeId.CYBERNETICSCORE).ready and self.already_pending(upgrade_id) == 0:
-            if self.can_afford(upgrade_id) and by.is_idle and ability_id in abilities:
-                by.research(upgrade_id)
-                print(description)
-
-        return self.record_failure(action_id, f'Cannot afford {description} or Cybernetics Core is not idle')
+        return await self._research_at(action_id, UnitTypeId.CYBERNETICSCORE, upgrade_id, ability_id, description,
+                                       'Cybernetics Core')
 
     async def research_twilight_upgrade(self, action_id, upgrade_id, ability_id, description):
         print(f'action={action_id}')
-
-        # 前置条件检查
-        if not self.structures(UnitTypeId.TWILIGHTCOUNCIL).exists:
-            return self.record_failure(action_id, 'Twilight Council does not exist')
-
-        # 获取随机的TWILIGHTCOUNCIL实例
-        vc = self.structures(UnitTypeId.TWILIGHTCOUNCIL).random
-        abilities = await self.get_available_abilities(vc)
-
-        # 检查是否可以研究指定的升级
-        if self.structures(UnitTypeId.TWILIGHTCOUNCIL).ready and self.already_pending(upgrade_id) == 0:
-            if self.can_afford(upgrade_id) and self.structures(
-                    UnitTypeId.TWILIGHTCOUNCIL).idle.exists and ability_id in abilities:
-                vc = self.structures(UnitTypeId.TWILIGHTCOUNCIL).idle.random
-                vc.research(upgrade_id)
-                print(description)
-
-        return self.record_failure(action_id, f'Cannot afford {description} or Twilight Council is not idle')
+        return await self._research_at(action_id, UnitTypeId.TWILIGHTCOUNCIL, upgrade_id, ability_id, description,
+                                       'Twilight Council')
 
     async def research_fleetbeacon_upgrade(self, action_id, upgrade_id, ability_id, description):
         print(f'action={action_id}')
@@ -924,143 +926,88 @@ class Protoss_Bot(BotAI):
 
     async def research_forge_upgrade(self, action_id, upgrade_id, ability_id, description):
         print(f'action={action_id}')
-
-        # 前置条件检查
-        if not (self.structures(UnitTypeId.PYLON).exists
-                and self.units(UnitTypeId.PROBE).exists
-                and self.structures(UnitTypeId.NEXUS).exists
-                and self.structures(UnitTypeId.FORGE).exists):
-            return self.record_failure(action_id, 'Required structures or units do not exist')
-
-        # 获取随机的FORGE实例
-        bf = self.structures(UnitTypeId.FORGE).random
-        abilities = await self.get_available_abilities(bf)
-
-        # 检查是否可以研究指定的升级
-        if self.structures(UnitTypeId.FORGE).ready and self.already_pending(upgrade_id) == 0:
-            if self.can_afford(upgrade_id) and self.structures(
-                    UnitTypeId.FORGE).idle.exists and ability_id in abilities:
-                bf = self.structures(UnitTypeId.FORGE).idle.random
-                bf.research(upgrade_id)
-                print(description)
-
-        return self.record_failure(action_id, f'Cannot afford {description} or Forge is not idle')
+        return await self._research_at(action_id, UnitTypeId.FORGE, upgrade_id, ability_id, description,
+                                       'Forge')
 
     async def research_roboticsbay_upgrade(self, action_id, upgrade_id, ability_id, description):
         print(f'action={action_id}')
-
-        # 前置条件检查
-        if not (self.structures(UnitTypeId.PYLON).exists
-                and self.units(UnitTypeId.PROBE).exists
-                and self.structures(UnitTypeId.NEXUS).exists
-                and self.structures(UnitTypeId.ROBOTICSFACILITY).exists
-                and self.structures(UnitTypeId.ROBOTICSBAY).exists):
-            return self.record_failure(action_id, 'Required structures or units do not exist')
-
-        # 获取随机的ROBOTICSBAY实例
-        vb = self.structures(UnitTypeId.ROBOTICSBAY).random
-        abilities = await self.get_available_abilities(vb)
-
-        # 检查是否可以研究指定的升级
-        if self.structures(UnitTypeId.ROBOTICSBAY).ready and self.already_pending(upgrade_id) == 0:
-            if self.can_afford(upgrade_id) and self.structures(
-                    UnitTypeId.ROBOTICSBAY).idle.exists and ability_id in abilities:
-                vb = self.structures(UnitTypeId.ROBOTICSBAY).idle.random
-                vb.research(upgrade_id)
-                print(description)
-
-        return self.record_failure(action_id, f'Cannot afford {description} or RoboticsBay is not idle')
+        return await self._research_at(action_id, UnitTypeId.ROBOTICSBAY, upgrade_id, ability_id, description,
+                                       'Robotics Bay')
 
     async def apply_chronoboost(self, action_id, target_type, supply_requirement, description):
+        """v2: boost one busy, not-yet-boosted target from one Nexus with
+        energy, and report success correctly (v1 boosted from every Nexus,
+        picked a random possibly idle target, and always reported failure)."""
         print(f'action={action_id}')
 
-        # 前置条件检查
         if not self.structures(target_type).exists:
             return self.record_failure(action_id, f'{target_type} does not exist')
-
         if not self.structures(UnitTypeId.NEXUS).exists:
             return self.record_failure(action_id, 'Nexus does not exist')
-
-        target = self.structures(target_type).random
-
-        # 检查目标建筑是否空闲或已经被加速
-        if target.is_idle or target.has_buff(BuffId.CHRONOBOOSTENERGYCOST):
-            return self.record_failure(action_id, f'{description} is idle or already chronoboosted')
-
-        # 检查供应情况
         if self.supply_left < supply_requirement:
             return self.record_failure(action_id, f'Not enough supply for {description}')
 
-        # 尝试应用星空加速
-        nexuses = self.structures(UnitTypeId.NEXUS)
-        abilities = await self.get_available_abilities(nexuses)
-        for loop_nexus, abilities_nexus in zip(nexuses, abilities):
-            if AbilityId.EFFECT_CHRONOBOOSTENERGYCOST in abilities_nexus:
-                loop_nexus(AbilityId.EFFECT_CHRONOBOOSTENERGYCOST, target)
-                print(f'Chronoboost applied to {description}')
+        targets = [t for t in self.structures(target_type).ready
+                   if not t.is_idle and not t.has_buff(BuffId.CHRONOBOOSTENERGYCOST)]
+        if not targets:
+            return self.record_failure(action_id, f'{description} is idle or already chronoboosted')
 
-        return self.record_failure(action_id, f'No available Nexus to chronoboost {description}')
+        nexuses = self.structures(UnitTypeId.NEXUS).ready
+        abilities = await self.get_available_abilities(nexuses)
+        for nexus, nexus_abilities in zip(nexuses, abilities):
+            if AbilityId.EFFECT_CHRONOBOOSTENERGYCOST in nexus_abilities:
+                nexus(AbilityId.EFFECT_CHRONOBOOSTENERGYCOST, targets[0])
+                print(f'Chronoboost applied to {description}')
+                return True
+        return self.record_failure(action_id, f'No Nexus has 50 energy to chronoboost {description}')
 
     async def warp_unit(self, action_id: int, unit_type: UnitTypeId, initial_reference_point: Point2,
                         required_buildings: List[UnitTypeId] = None,
                         max_attempts=5) -> None:
         """
         尝试在参考点附近折跃指定的单位。
-        :param action_id: 动作的ID，用于记录失败原因。
-        :param unit_type: 想要折跃的单位类型。
-        :param initial_reference_point: 参考点，通常是最接近敌方基地的水晶塔。
-        :param max_attempts: 尝试折跃的最大次数。
-        :param required_buildings: 需要的科技建筑列表。
-        """
 
-        # 如果需要额外的科技建筑，则进行检查
+        v2: checks every warp gate for one whose warp-in is off cooldown (v1
+        only looked at the first "idle" gate, and cooling-down gates still
+        count as idle), supports all six warpable gateway units, warps once
+        and reports success correctly (v1 always reported a placement
+        failure afterwards).
+        """
         if required_buildings:
             for building in required_buildings:
                 if not self.structures(building).exists:
                     return self.record_failure(action_id, f'{building.name} not available')
 
-        # 检查是否是允许折跃的单位类型
-        if unit_type not in {UnitTypeId.ZEALOT, UnitTypeId.STALKER, UnitTypeId.DARKTEMPLAR}:
+        warp_ability = WARP_ABILITY.get(unit_type)
+        if warp_ability is None:
             return self.record_failure(action_id, f"Unit type {unit_type.name} not warpable")
-
-        # 检查是否有Warp Gate存在
-        if not self.structures(UnitTypeId.WARPGATE).exists:
+        if not self.structures(UnitTypeId.WARPGATE).ready.exists:
             return self.record_failure(action_id, 'No Warp Gate available')
-
-        # 选择一个空闲的Warp Gate
-        idle_warpgates = self.structures(UnitTypeId.WARPGATE).ready.idle
-        if not idle_warpgates:
-            return self.record_failure(action_id, 'No idle Warp Gate available')
-        warpgate = idle_warpgates.first
-        warp_ability = getattr(AbilityId, f"WARPGATETRAIN_{unit_type.name}")
-
-        # 获取Warp Gate的可用能力
-        abilities = await self.get_available_abilities(warpgate)
-
-        # 检查是否可以从Warp Gate中折跃指定的单位
-        if warp_ability not in abilities:
-            return self.record_failure(action_id, f'Cannot train {unit_type.name} from Warp Gate')
-        elif not self.can_afford(unit_type):
+        if not self.can_afford(unit_type):
             return self.record_failure(action_id, f'Cannot afford {unit_type.name}')
-        elif self.supply_left < self.calculate_supply_cost(unit_type):
+        if self.supply_left < self.calculate_supply_cost(unit_type):
             return self.record_failure(action_id, 'Not enough supply left')
 
-        # 查找最接近参考点的有能量的水晶塔
+        warpgates = self.structures(UnitTypeId.WARPGATE).ready
+        abilities = await self.get_available_abilities(warpgates)
+        warpgate = next((g for g, a in zip(warpgates, abilities) if warp_ability in a), None)
+        if warpgate is None:
+            return self.record_failure(action_id, f'All Warp Gates are on cooldown for {unit_type.name}')
+
         pylons = [p for p in self.structures(UnitTypeId.PYLON) if p.is_ready]
-        pylons.sort(key=lambda p: p.distance_to(initial_reference_point))
         if not pylons:
             return self.record_failure(action_id, 'No powered pylons available')
-        pylon = pylons[0]
+        pylons.sort(key=lambda p: p.distance_to(initial_reference_point))
 
-        # 尝试在水晶塔附近找到一个合适的位置进行折跃
-        for distance in range(1, 6):
-            pos = pylon.position.random_on_distance(distance)
-            placement = await self.find_placement(warp_ability, pos, placement_step=1)
-            if placement and placement.distance_to(pylon.position) <= 5:
-                warpgate.warp_in(unit_type, placement)
-                print(f'Warped in {unit_type.name}')
+        for pylon in pylons[:3]:
+            for distance in range(1, 6):
+                pos = pylon.position.random_on_distance(distance)
+                placement = await self.find_placement(warp_ability, pos, placement_step=1)
+                if placement and placement.distance_to(pylon.position) <= 6:
+                    warpgate.warp_in(unit_type, placement)
+                    print(f'Warped in {unit_type.name}')
+                    return True
 
-        # 如果所有尝试都失败，记录失败原因
         return self.record_failure(action_id, f"Couldn't find a placement near pylon for {unit_type.name}")
 
     async def train_from_gateway(self, action_id: int, unit_type: UnitTypeId,
@@ -1129,10 +1076,9 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, 'No Robotics Facility available')
 
         # 检查是否有正在生产的单位
-        if robotics_facilities.filter(lambda facility: facility.is_idle).empty:
-            # 如果所有的 Robotics Facility 都在忙，那么不进行新的生产任务。
-            print('Robotics Facility is busy')
-            return  # 不记录失败，因为这是正常的生产状态
+        if robotics_facilities.ready.idle.empty:
+            # v2: reported (v1 skipped silently, which looked like a success)
+            return self.record_failure(action_id, 'All Robotics Facilities are busy')
 
         # 如果存在单位限制，则检查是否已经达到
         if unit_limit is not None and (self.units(unit_type).amount + self.already_pending(unit_type)) >= unit_limit:
@@ -1145,7 +1091,7 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, f'Cannot afford {unit_type.name}')
 
         # 找到一个空闲的Robotics Facility并开始训练
-        idle_facility = robotics_facilities.idle.first
+        idle_facility = robotics_facilities.ready.idle.first
         if idle_facility:
             idle_facility.train(unit_type)
             print(f'训练{unit_type.name}')
@@ -1173,10 +1119,9 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, 'No Stargate available')
 
         # 检查是否有正在生产的单位
-        if stargates.filter(lambda facility: facility.is_idle).empty:
-            # 如果所有的 Stargate 都在忙，那么不进行新的生产任务。
-            print('Stargate is busy')
-            return  # 不记录失败，因为这是正常的生产状态
+        if stargates.ready.idle.empty:
+            # v2: reported (v1 skipped silently, which looked like a success)
+            return self.record_failure(action_id, 'All Stargates are busy')
 
         # 如果存在单位限制，则检查是否已经达到
         if unit_limit is not None and (self.units(unit_type).amount + self.already_pending(unit_type)) >= unit_limit:
@@ -1189,7 +1134,7 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, f'Cannot afford {unit_type.name}')
 
         # 找到一个空闲的Stargate并开始训练
-        idle_stargate = stargates.idle.first
+        idle_stargate = stargates.ready.idle.first
         if idle_stargate:
             idle_stargate.train(unit_type)
             print(f'训练{unit_type.name}')
@@ -1200,7 +1145,11 @@ class Protoss_Bot(BotAI):
 
     async def handle_action_attack(self, action_id, iteration):
         print(f'action={action_id}')
-        await self.attack()
+        if not await self.attack():
+            reason = ('Army supply is below 10' if self.bot_rules == "legacy" and self.army_supply < 10
+                      else 'No idle army units to send')
+            return self.record_failure(action_id, reason)
+        return True
 
     async def handle_action_0(self):
         action_id = 0
@@ -1209,18 +1158,19 @@ class Protoss_Bot(BotAI):
         if not self.structures(UnitTypeId.NEXUS).exists:
             return self.record_failure(action_id, 'No Nexus available')
 
-        for nexus in self.townhalls:
-            if self.workers.amount + self.already_pending(UnitTypeId.PROBE) > 75:
-                return self.record_failure(action_id, 'Too many probes (more than 75)')
-            if self.supply_left <= 0:
-                return self.record_failure(action_id, 'No supply left')
-            if not self.can_afford(UnitTypeId.PROBE):
-                return self.record_failure(action_id, 'Cannot afford Probe')
-            if nexus.is_idle:
-                nexus.train(UnitTypeId.PROBE)
-                print('训练探机')
-                return
-
+        if self.workers.amount + self.already_pending(UnitTypeId.PROBE) > 75:
+            return self.record_failure(action_id, 'Too many probes (more than 75)')
+        if self.supply_left <= 0:
+            return self.record_failure(action_id, 'No supply left')
+        if not self.can_afford(UnitTypeId.PROBE):
+            return self.record_failure(action_id, 'Cannot afford Probe')
+        # v2: prefer an idle nexus, else queue behind the current probe (one
+        # deep), so a probe order issued while every nexus trains is not lost.
+        nexuses = sorted(self.townhalls.ready, key=lambda n: len(n.orders))
+        if nexuses and len(nexuses[0].orders) < 2:
+            nexuses[0].train(UnitTypeId.PROBE)
+            print('训练探机')
+            return True
         return self.record_failure(action_id, 'All Nexus are busy')
 
     async def handle_action_1(self):
@@ -1378,7 +1328,7 @@ class Protoss_Bot(BotAI):
     async def handle_action_17(self):
         action_id = 17
         print(f'action={action_id}')
-        required_buildings = [UnitTypeId.DISRUPTOR]
+        required_buildings = [UnitTypeId.ROBOTICSBAY]  # v1 checked for the DISRUPTOR unit, so it never ran
         await self.train_from_robotics(action_id, UnitTypeId.DISRUPTOR, required_buildings=required_buildings,
                                        unit_limit=1)
         print('训练干扰者')
@@ -1411,25 +1361,33 @@ class Protoss_Bot(BotAI):
         if not (self.structures(UnitTypeId.NEXUS).exists and self.units(UnitTypeId.PROBE).exists):
             return self.record_failure(action_id, 'No Nexus or Probe available')
 
-        # 根据当前时间设置供应量阈值和已挂起的Pylon数量
-        supply_left_threshold, pending_pylon_threshold = 3, 2
-        current_time = self.time_formatted
+        if self.bot_rules == "legacy":
+            # 根据当前时间设置供应量阈值和已挂起的Pylon数量
+            supply_left_threshold, pending_pylon_threshold = 3, 2
+            current_time = self.time_formatted
 
-        if '06:00' <= current_time <= '07:00':
-            supply_left_threshold, pending_pylon_threshold = 5, 4
-        elif '06:00' <= current_time <= '08:00':
-            supply_left_threshold, pending_pylon_threshold = 5, 3
-        elif '08:00' <= current_time <= '10:00':
-            supply_left_threshold, pending_pylon_threshold = 7, 4
-        elif '10:00' <= current_time:
-            supply_left_threshold, pending_pylon_threshold = 7, 4
+            if '06:00' <= current_time <= '07:00':
+                supply_left_threshold, pending_pylon_threshold = 5, 4
+            elif '06:00' <= current_time <= '08:00':
+                supply_left_threshold, pending_pylon_threshold = 5, 3
+            elif '08:00' <= current_time <= '10:00':
+                supply_left_threshold, pending_pylon_threshold = 7, 4
+            elif '10:00' <= current_time:
+                supply_left_threshold, pending_pylon_threshold = 7, 4
+            should_build = (self.supply_left <= supply_left_threshold and
+                            self.already_pending(UnitTypeId.PYLON) <= pending_pylon_threshold and
+                            not self.supply_cap == 200)  # 确保供应上限不是200
+            not_needed = 'Not the right conditions to build a Pylon'
+        else:
+            # Dynamic: keep enough free supply for one production cycle of every
+            # production building, counting pylons/nexuses already under way.
+            needed, covered = self.pylon_supply_need()
+            should_build = self.supply_cap < 200 and covered < needed
+            not_needed = (f'Supply is sufficient ({covered} free or under construction, '
+                          f'{needed} needed for one production cycle)')
 
         # 如果满足建造Pylon的条件，则执行建造
-        if (
-                self.supply_left <= supply_left_threshold and
-                self.already_pending(UnitTypeId.PYLON) <= pending_pylon_threshold and
-                not self.supply_cap == 200  # 确保供应上限不是200
-        ):
+        if should_build:
             if not self.can_afford(UnitTypeId.PYLON):
                 return self.record_failure(action_id, 'Cannot afford Pylon')
 
@@ -1444,7 +1402,18 @@ class Protoss_Bot(BotAI):
 
         else:
             # 如果不满足建造条件
-            return self.record_failure(action_id, 'Not the right conditions to build a Pylon')
+            return self.record_failure(action_id, not_needed)
+
+    def pylon_supply_need(self):
+        """Dynamic pylon rule: (supply needed for one production cycle,
+        free supply plus supply already under construction)."""
+        gates = self.structures(UnitTypeId.GATEWAY).amount + self.structures(UnitTypeId.WARPGATE).amount
+        needed = (2 + 2 * self.townhalls.amount + 2 * gates
+                  + 4 * self.structures(UnitTypeId.ROBOTICSFACILITY).amount
+                  + 4 * self.structures(UnitTypeId.STARGATE).amount)
+        covered = (self.supply_left + 8 * self.already_pending(UnitTypeId.PYLON)
+                   + 15 * self.already_pending(UnitTypeId.NEXUS))
+        return needed, int(covered)
 
     async def handle_action_20(self):
         action_id = 20
@@ -1478,9 +1447,10 @@ class Protoss_Bot(BotAI):
                             UnitTypeId.ASSIMILATOR).closer_than(2, vespene):
                         await self.build(UnitTypeId.ASSIMILATOR, vespene)
                         print('建设气矿')
-                        return  # 在开始建造后立即退出函数，确保一次只建造一个Assimilator
+                        return True  # 在开始建造后立即退出函数，确保一次只建造一个Assimilator
+            return self.record_failure(action_id, 'No free geyser near a Nexus')
         else:
-            print('Already building 2 Assimilators, waiting...')  # 如果已经有2个在建造中，则等待
+            return self.record_failure(action_id, '2 Assimilators already under construction')
 
     async def handle_action_21(self):
         action_id = 21
@@ -1490,10 +1460,11 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, 'No Probe available')
         if not self.can_afford(UnitTypeId.NEXUS):
             return self.record_failure(action_id, 'Cannot afford Nexus')
-        if self.can_afford(UnitTypeId.NEXUS) and self.already_pending(UnitTypeId.NEXUS) <= 1 and self.structures(
-                UnitTypeId.NEXUS).amount <= 8:
-            await self.expand_now()
-            print('扩建基地')
+        if self.already_pending(UnitTypeId.NEXUS) > 1 or self.structures(UnitTypeId.NEXUS).amount > 8:
+            return self.record_failure(action_id, 'A Nexus is already under construction')
+        await self.expand_now()
+        print('扩建基地')
+        return True
 
     async def handle_action_22(self):
         action_id = 22
@@ -1702,7 +1673,8 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, 'No Nexus available')
         if not self.units(UnitTypeId.PROBE).exists:
             return self.record_failure(action_id, 'No Probe available')
-        if not self.structures(UnitTypeId.CYBERNETICSCORE).exists:
+        # legacy also required a Cybernetics Core; SC2 only needs a Forge
+        if self.bot_rules == "legacy" and not self.structures(UnitTypeId.CYBERNETICSCORE).exists:
             return self.record_failure(action_id, 'No Cybernetics Core available')
         if not self.structures(UnitTypeId.FORGE).exists:
             return self.record_failure(action_id, 'No Forge')
@@ -1730,7 +1702,8 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, 'No Probe available')
         if not self.structures(UnitTypeId.CYBERNETICSCORE).exists:
             return self.record_failure(action_id, 'No Cybernetics Core available')
-        if not self.structures(UnitTypeId.FORGE).exists:
+        # legacy also required a Forge; SC2 only needs a Cybernetics Core
+        if self.bot_rules == "legacy" and not self.structures(UnitTypeId.FORGE).exists:
             return self.record_failure(action_id, 'No Forge')
         if self.structures(UnitTypeId.SHIELDBATTERY).amount + self.already_pending(UnitTypeId.SHIELDBATTERY) > 3:
             return self.record_failure(action_id, 'Shield Battery limit reached')
@@ -1752,15 +1725,9 @@ class Protoss_Bot(BotAI):
         if not self.structures(UnitTypeId.CYBERNETICSCORE).exists:
             return self.record_failure(action_id, 'Cybernetics Core does not exist')
 
-        by = self.structures(UnitTypeId.CYBERNETICSCORE).random
-        abilities = await self.get_available_abilities(by)
-        if self.structures(UnitTypeId.CYBERNETICSCORE).ready and self.already_pending(UpgradeId.WARPGATERESEARCH) == 0:
-            if self.can_afford(UpgradeId.WARPGATERESEARCH) and by.is_idle and AbilityId.RESEARCH_WARPGATE in abilities:
-                by.research(UpgradeId.WARPGATERESEARCH)
-                print('研究折跃门')
-                return 0.010
-
-        return self.record_failure(action_id, 'Cannot afford Warp Gate research or Cybernetics Core is not idle')
+        # v2: same checks and precise reasons as the other research actions
+        return await self._research_at(action_id, UnitTypeId.CYBERNETICSCORE, UpgradeId.WARPGATERESEARCH,
+                                       AbilityId.RESEARCH_WARPGATE, 'Warp Gate research', 'Cybernetics Core')
 
     async def handle_action_35(self):
         upgrade_id = UpgradeId.PROTOSSAIRWEAPONSLEVEL1
@@ -1833,8 +1800,8 @@ class Protoss_Bot(BotAI):
                                                  AbilityId.FORGERESEARCH_PROTOSSGROUNDARMORLEVEL1, '研究地面1防')
 
     async def handle_action_48(self):
-        return await self.research_forge_upgrade(48, UpgradeId.PROTOSSGROUNDWEAPONSLEVEL2,
-                                                 AbilityId.FORGERESEARCH_PROTOSSGROUNDWEAPONSLEVEL2, '研究地面2防')
+        return await self.research_forge_upgrade(48, UpgradeId.PROTOSSGROUNDARMORSLEVEL2,
+                                                 AbilityId.FORGERESEARCH_PROTOSSGROUNDARMORLEVEL2, '研究地面2防')
 
     async def handle_action_49(self):
         return await self.research_forge_upgrade(49, UpgradeId.PROTOSSGROUNDARMORSLEVEL3,
@@ -1919,7 +1886,7 @@ class Protoss_Bot(BotAI):
         # return await self.research_fleetbeacon_upgrade(59, UpgradeId.TEMPESTGROUNDATTACKUPGRADE,
         #                                                AbilityId.FLEETBEACONRESEARCH_TEMPESTRESEARCHGROUNDATTACKUPGRADE,
         #                                                '研究风暴对建筑攻击')
-        return
+        return self.record_failure(59, 'Tempest ground attack research is not implemented by the bot')
 
     async def handle_action_60(self):
         return await self.handle_scouting(UnitTypeId.PROBE, 60)
@@ -1960,10 +1927,12 @@ class Protoss_Bot(BotAI):
             return self.record_failure(action_id, 'No units available to retreat')
 
         try:
-            # Choose the closest nexus to move to
-            closest_nexus = units_to_retreat.closest_to(self.enemy_start_locations[0])
+            # v2: retreat to our townhall nearest the army (v1 moved every unit to
+            # the unit closest to the enemy base, i.e. forward).
+            home = (self.townhalls.closest_to(units_to_retreat.center).position
+                    if self.townhalls.exists else self.start_location)
             for retreat_unit in units_to_retreat:
-                retreat_unit.move(closest_nexus)
+                retreat_unit.move(home)
             print('Retreat initiated')
         except Exception as e:
             return self.record_failure(action_id, f'Retreat failed due to: {e}')
@@ -2014,9 +1983,13 @@ class Protoss_Bot(BotAI):
         await self.defend()
 
         # 锁定并读取动作
+        alive_scouts = self.scout_tags & {u.tag for u in self.units}
         with self.lock:
             self.transaction['information'] = information
             self.transaction['game_loop'] = self.state.game_loop
+            # Extra facts for action masking that `information` does not carry.
+            self.transaction['scouts_out'] = len(alive_scouts)
+            self.transaction['chrono_ready'] = any(n.energy >= 50 for n in self.townhalls.ready)
         print("action", self.transaction['action'])
         while self.transaction['action'] is None:
             time.sleep(0.001)
@@ -2043,7 +2016,7 @@ class Protoss_Bot(BotAI):
             await method()
         else:
             print(f'Error: Method {method_name} does not exist!')
-        if self.time_formatted >= "12:00" and self.supply_used >= 100:
+        if self.bot_rules == "legacy" and self.time_formatted >= "12:00" and self.supply_used >= 100:
             ordered = await self.attack()
             self.scripted_attack_rule_steps += 1
             if ordered:
@@ -2071,9 +2044,10 @@ class Protoss_Bot(BotAI):
         self.isReadyForNextStep.set()
 
     async def attack(self):
-        """Returns how many units were given an order (used only for telemetry)."""
+        """Returns how many units were given an order. Legacy rules only move
+        out with at least 10 army supply; dynamic rules leave that to the agent."""
         ordered = 0
-        if self.army_supply >= 10:
+        if self.army_supply >= (10 if self.bot_rules == "legacy" else 1):
             attack_units = [UnitTypeId.ZEALOT, UnitTypeId.ARCHON, UnitTypeId.STALKER, UnitTypeId.SENTRY,
                             UnitTypeId.ADEPT, UnitTypeId.HIGHTEMPLAR, UnitTypeId.DARKTEMPLAR,
                             UnitTypeId.OBSERVER, UnitTypeId.PHOENIX, UnitTypeId.CARRIER, UnitTypeId.VOIDRAY,
@@ -2184,7 +2158,8 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
 
     # 运行游戏
     result = run_game(maps.get(map),
-                      [Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep)),
+                      [Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep,
+                                                   bot_rules=getattr(args, 'bot_rules', 'dynamic'))),
                        Computer(map_race(opposite_race), map_difficulty(difficulty), map_ai_build(args.ai_build))],
                       realtime=args.real_time,
                       save_replay_as=temp_replay_path,
@@ -2226,7 +2201,8 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
     temp_replay_path = f'{replay_folder}/{args.current_time}_{map}_player_race_PROTOSS_VS_RULE_AI_{opposite_bot}_{opposite_race}_process_{process_id}_temp.SC2Replay'
 
     result = run_game(maps.get(map),
-                      [Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep)),
+                      [Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep,
+                                                   bot_rules=getattr(args, 'bot_rules', 'dynamic'))),
                        Bot(map_race(opposite_race), map_rule_bot(opposite_bot))],
                       realtime=args.real_time,
                       save_replay_as=temp_replay_path,
@@ -2268,7 +2244,8 @@ def protoss_agent_vs_human(transaction, lock, map_name, isReadyForNextStep, game
     # 运行游戏
     result = run_game(maps.get(map),
                       [Human(map_race(opposite_race)),
-                       Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep))],
+                       Bot(Race.Protoss, Protoss_Bot(transaction, lock, isReadyForNextStep,
+                                                   bot_rules=getattr(args, 'bot_rules', 'dynamic')))],
                       realtime=args.real_time,
                       save_replay_as=temp_replay_path)
     # 优化result

@@ -192,6 +192,11 @@ class RunLogger:
             "platform": platform.platform(),
             "schema_version": SCHEMA_VERSION,
         })
+        try:
+            from ..env.bot.version import BOT_VERSION
+            cfg["bot_version"] = BOT_VERSION
+        except Exception:
+            cfg["bot_version"] = None
         if self.job_type == "game":
             # Which SC2 build/platform this machine launches (headless Linux 4.10
             # vs Windows 5.0.x give different balance, so results must not mix).
@@ -477,6 +482,8 @@ class RunLogger:
             "model_resolved": self.model_resolved,
             "sc2_version": self.config.get("sc2_version"),
             "sc2_platform": self.config.get("sc2_platform"),
+            "bot_version": self.config.get("bot_version"),
+            "bot_rules": self.config.get("bot_rules"),
             "time_to_first_attack_s": self.time_to_first_attack_s,
             **self.scripted_attack,
             "scripted_attack_first_order_s": self.scripted_attack_first_order_s,

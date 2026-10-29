@@ -117,9 +117,9 @@ def _build_specs() -> Dict[int, ActionSpec]:
         S(29, "BUILD DARKSHRINE", requires=("pylon", "twilight_council")),
         S(30, "BUILD ROBOTICSBAY", requires=("pylon", "robotics_facility")),
         S(31, "BUILD FLEETBEACON", requires=("pylon", "stargate")),
-        # The bot requires both forge and cybernetics core for cannons and batteries.
-        S(32, "BUILD PHOTONCANNON", requires=("pylon", "forge", "cybernetics_core")),
-        S(33, "BUILD SHIELDBATTERY", requires=("pylon", "forge", "cybernetics_core")),
+        # SC2 prerequisites; legacy bot rules add the other building (capacity.py).
+        S(32, "BUILD PHOTONCANNON", requires=("pylon", "forge")),
+        S(33, "BUILD SHIELDBATTERY", requires=("pylon", "cybernetics_core")),
         # --- research ---
         S(34, "RESEARCH WARPGATERESEARCH", requires=("cybernetics_core",), research_key="warpgate"),
         *_upgrade_line(35, "RESEARCH PROTOSSAIRWEAPONSLEVEL{}", "protoss_air_weapon_level_{}",
@@ -166,7 +166,7 @@ PROTOSS_ACTIONS: Dict[int, ActionSpec] = _build_specs()
 EMPTY_ACTION_ID = 71
 
 
-def illegal_reason(spec: ActionSpec, s: GameState) -> Optional[str]:
+def illegal_reason(spec: ActionSpec, s: GameState, rules: str = "dynamic") -> Optional[str]:
     missing = [b for b in spec.requires if not s.has(b)]
     if missing:
         return "needs " + " and ".join(missing)
@@ -184,12 +184,13 @@ def illegal_reason(spec: ActionSpec, s: GameState) -> Optional[str]:
         reason = spec.check(s)
         if reason:
             return reason
-    return capacity_reason(spec.id, spec.name, s)
+    return capacity_reason(spec.id, spec.name, s, rules)
 
 
-def legal_actions(s: GameState) -> Dict[int, Optional[str]]:
-    """id -> None if legal, else the reason it is masked."""
-    return {i: illegal_reason(spec, s) for i, spec in PROTOSS_ACTIONS.items()}
+def legal_actions(s: GameState, rules: str = "dynamic") -> Dict[int, Optional[str]]:
+    """id -> None if legal, else the reason it is masked. `rules` is the bot's
+    bot_rules mode ("dynamic" or "legacy")."""
+    return {i: illegal_reason(spec, s, rules) for i, spec in PROTOSS_ACTIONS.items()}
 
 
 def catalog_text() -> str:

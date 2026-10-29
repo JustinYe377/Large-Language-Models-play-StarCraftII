@@ -339,6 +339,37 @@ Games go to `log/harness_log/`. Telemetry records `parse_tier` as the transport 
 
 Phase 2, not done yet, replaces the fixed cadence and padding with event-driven decisions and a queue that waits until an action's conditions are met.
 
+## Protoss bot v2 and `--bot_rules`
+
+The Protoss bot (`env/bot/Protoss_bot.py`) executes the agent's actions, and both agents share it. Version `v2` fixes handler bugs that made the agent's feedback wrong. Every run records `bot_version` and `bot_rules`, so wandb can keep v1 and v2 games apart.
+
+**Fixes (v2)**
+
+- **Success reported as failure.** Research (cybernetics core, twilight council, forge, robotics bay), chrono boost and warp-in all reported a failure after succeeding.
+- **Silent skips reported as success.** Building limits, busy robotics facility/stargate, assimilator/nexus limits, the scouting interval, attack with no army, and the unimplemented action 59 now report a failure with the reason.
+- **Warp-in.**
+  - Every warp gate is checked for one off cooldown; v1 only checked the first "idle" gate.
+  - Adepts, sentries and high templar can be warped too.
+  - A successful warp is no longer followed by a placement failure.
+- **Chrono boost.** Only one Nexus casts, only on a busy, unboosted target. The failure says whether the problem was an idle target or no Nexus with 50 energy.
+- **Probes** queue one deep behind the current probe instead of failing on a busy Nexus.
+- **Other fixes.**
+  - Disruptor: the prerequisite was the disruptor unit itself, so it could never be built.
+  - Action 48 researched ground weapons 2 instead of ground armor 2.
+  - Retreat moved the army toward the enemy instead of home.
+
+**`--bot_rules dynamic` (default) vs `legacy`**
+
+| | dynamic | legacy (v1 strategy) |
+|---|---|---|
+| Pylons | built when free supply plus supply under construction is below one production cycle (2 per Nexus/gateway, 4 per robotics facility/stargate, +2) | only when free supply ≤ 3–7 (by game time) |
+| Building counts | no time-window limits; the agent decides | e.g. at most 1 gateway before 3:00 (warp gates now counted) |
+| Attack | only when the agent orders `MULTI-ATTACK`, with any army | also a scripted attack after 12:00 at 100+ supply; needs 10 army supply |
+| Scouting | one scout at a time | one scout per 300 steps |
+| Cannon / battery | SC2 prerequisites (forge / cybernetics core) | both need forge and cybernetics core |
+
+The harness mask (`harness/capacity.py`) mirrors whichever mode is active. The bot also reports `scouts_out` and `chrono_ready` each step, so scouting and chrono boost are masked when they cannot work.
+
 ## Telemetry
 
 Every game run with `--agent_type gpt|chatgpt|deepseek`, from `test_the_env.py` or `multiprocess_test.py`, is recorded for comparing experiments. This is measurement only: prompts, decision frequency, the extractor, the resource filter and `mix_actions` are unchanged.

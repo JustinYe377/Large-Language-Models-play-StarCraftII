@@ -1,9 +1,10 @@
 """
-Capacity / bot-rule masking: hide actions the bot would refuse or silently
-skip right now, even though their prerequisites exist.
+Capacity / bot-rule masking: hide actions the bot would refuse right now,
+even though their prerequisites exist.
 
-Each rule mirrors the corresponding handler in env/bot/Protoss_bot.py, so the
-mask predicts what the bot will actually do, not what SC2 would allow.
+Each rule mirrors the corresponding handler in env/bot/Protoss_bot.py (bot
+v2), for both `bot_rules` modes, so the mask predicts what the bot will
+actually do, not what SC2 would allow.
 Things the observation cannot show (Nexus energy, existing chrono buffs,
 warp-gate cooldowns, building placement, the scouting interval) are not
 masked; those actions can still fail.
@@ -65,7 +66,6 @@ UNIT_LIMITS = {13: ("observer", 2), 15: ("warp_prism", 1), 17: ("disruptor", 1),
                10: ("oracle", 1), 11: ("phoenix", 4)}
 
 GATEWAY_UNITS = {1: "zealot", 2: "adept", 3: "stalker", 4: "sentry", 5: "high_templar", 6: "dark_templar"}
-WARPABLE = {"zealot", "stalker", "dark_templar"}   # warp_unit() whitelist
 
 
 def _total(s: GameState, building):
@@ -97,19 +97,28 @@ def _supply_cost(name):
     return PROTOSS_ACTION_COSTS.get(name, {}).get("supply", 0)
 
 
-def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
-    t = s.game_time
+def pylon_supply_need(s: GameState):
+    """Mirror of Protoss_Bot.pylon_supply_need (dynamic rules)."""
+    gates = s.buildings.get("gateway", 0) + s.buildings.get("warp_gate", 0)
+    needed = (2 + 2 * s.buildings.get("nexus", 0) + 2 * gates
+              + 4 * s.buildings.get("robotics_facility", 0) + 4 * s.buildings.get("stargate", 0))
+    covered = (s.supply_left + 8 * s.buildings_pending.get("pylon", 0)
+               + 15 * s.buildings_pending.get("nexus", 0))
+    return needed, covered
 
-    # --- probes (handle_action_0) ---
-    # Not masked while every nexus is training: the queued slot runs a few
-    # steps later, usually after the current probe finished. Masking it cut
-    # probe production (58 vs 77 workers at 10:00 in a VeryEasy A/B game);
-    # the phase-2 conditional queue is the proper fix.
+
+def capacity_reason(action_id: int, name: str, s: GameState, rules: str = "dynamic") -> Optional[str]:
+    t = s.game_time
+    legacy = rules == "legacy"
+
+    # --- probes (handle_action_0): bot v2 queues one probe behind the current one ---
     if action_id == 0:
         if s.workers + s.units_pending.get("probe", 0) > 75:
             return "probe cap (75) reached"
         if s.supply_left <= 0:
             return "no free supply"
+        if s.units_pending.get("probe", 0) >= 2 * s.buildings.get("nexus", 0):
+            return "every nexus already has a probe queued"
         return None
 
     # --- other units need free supply (train_from_* / warp_unit check it) ---
@@ -119,10 +128,7 @@ def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
 
     # --- gateway units (produce_bg_unit) ---
     if action_id in GATEWAY_UNITS:
-        unit = GATEWAY_UNITS[action_id]
         if "warpgate" in s.research_done:
-            if unit not in WARPABLE:
-                return "the bot can only warp in zealots, stalkers and dark templar after warp gate research"
             if not s.buildings.get("warp_gate", 0):
                 return "no warp gate yet"
         elif not s.buildings.get("gateway", 0):
@@ -135,8 +141,6 @@ def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
         if s.units.get(unit, 0) + s.units_pending.get(unit, 0) >= limit:
             return f"{unit} limit ({limit}) reached"
     if action_id in range(13, 18):
-        if action_id == 17:
-            return "the bot cannot build disruptors (its prerequisite check is broken)"
         if _pending_units(s, ROBO_UNITS) >= s.buildings.get("robotics_facility", 0):
             return "every robotics facility is busy"
     if action_id in range(7, 12):
@@ -151,13 +155,19 @@ def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
 
     # --- pylon (handle_action_19) ---
     if action_id == 19:
-        max_free, max_pending = _pylon_thresholds(t)
         if s.supply_cap >= 200:
             return "supply cap is already 200"
-        if s.supply_left > max_free:
-            return f"not needed yet: the bot builds pylons only when free supply <= {max_free}"
-        if s.buildings_pending.get("pylon", 0) > max_pending:
-            return f"{s.buildings_pending.get('pylon', 0)} pylons already under construction"
+        if legacy:
+            max_free, max_pending = _pylon_thresholds(t)
+            if s.supply_left > max_free:
+                return f"not needed yet: the bot builds pylons only when free supply <= {max_free}"
+            if s.buildings_pending.get("pylon", 0) > max_pending:
+                return f"{s.buildings_pending.get('pylon', 0)} pylons already under construction"
+        else:
+            needed, covered = pylon_supply_need(s)
+            if covered >= needed:
+                return (f"supply is sufficient ({covered} free or under construction, "
+                        f"{needed} needed for one production cycle)")
 
     # --- assimilator (handle_action_20) ---
     if action_id == 20 and s.buildings_pending.get("assimilator", 0) >= 2:
@@ -167,12 +177,17 @@ def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
     if action_id == 21 and (s.buildings_pending.get("nexus", 0) > 1 or s.buildings.get("nexus", 0) > 8):
         return "a nexus is already under construction"
 
-    # --- buildings with time-window limits ---
-    if action_id in BUILDING_LIMITS:
+    # --- legacy only: time-window building limits and the extra cannon/battery prerequisite ---
+    if legacy and action_id in BUILDING_LIMITS:
         building, windows = BUILDING_LIMITS[action_id]
+        count = _total(s, building) + (s.buildings.get("warp_gate", 0) if building == "gateway" else 0)
         for (start, end), limit in windows.items():
-            if start <= t <= end and _total(s, building) >= limit:
+            if start <= t <= end and count >= limit:
                 return f"limit of {limit} {building} until {end}"
+    if legacy and action_id == 32 and not s.has("cybernetics_core"):
+        return "needs cybernetics_core (legacy rules)"
+    if legacy and action_id == 33 and not s.has("forge"):
+        return "needs forge (legacy rules)"
     if action_id in (32, 33) and _total(s, "photon_cannon" if action_id == 32 else "shield_battery") > 3:
         return "limit of 4 reached"
 
@@ -184,7 +199,13 @@ def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
     if action_id == 59:
         return "not implemented by the bot"
 
-    # --- chronoboost needs a busy target (apply_chronoboost) ---
+    # --- scouting (handle_scouting): dynamic rules send one scout at a time ---
+    if not legacy and action_id in (60, 61, 62, 63) and s.scouts_out:
+        return "a scout is already out"
+
+    # --- chronoboost needs a busy target and a Nexus with 50 energy (apply_chronoboost) ---
+    if action_id in CHRONO and s.chrono_ready is False:
+        return "no Nexus has 50 energy"
     if action_id in CHRONO:
         building, supply_req = CHRONO[action_id]
         if s.supply_left < supply_req:
@@ -197,6 +218,6 @@ def capacity_reason(action_id: int, name: str, s: GameState) -> Optional[str]:
             return f"{building} is idle"
 
     # --- army orders ---
-    if action_id == 64 and s.army_supply < 10:
-        return "attack() only moves out with at least 10 army supply"
+    if legacy and action_id == 64 and s.army_supply < 10:
+        return "attack() only moves out with at least 10 army supply (legacy rules)"
     return None

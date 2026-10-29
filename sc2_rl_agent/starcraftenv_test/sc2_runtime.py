@@ -38,6 +38,10 @@ def add_game_run_args(parser):
                         help='End the game as a Tie after this many in-game seconds. Default: no limit.')
     parser.add_argument('--random_seed', type=int, default=None,
                         help='SC2 random seed for reproducible games. Default: SC2 picks one.')
+    parser.add_argument('--bot_rules', type=str, default='dynamic', choices=['dynamic', 'legacy'],
+                        help='Protoss bot strategy rules. dynamic (default): supply-driven pylons, no '
+                             'time-window building limits, no scripted 12:00 attack. legacy: the original '
+                             'hard-coded rules, for comparing with older games.')
     return parser
 
 

@@ -267,6 +267,8 @@ class Text_Starcraftenv_Build_In_Bot(gym.Env):
             'scripted_attack_units_ordered': self.transaction.get('scripted_attack_units_ordered', 0),
             'replay_path': self.transaction.get('replay_path'),
             'sc2_game_version': self.transaction.get('sc2_game_version'),
+            'scouts_out': self.transaction.get('scouts_out'),
+            'chrono_ready': self.transaction.get('chrono_ready'),
         }
 
         # 确保每个状态的部分都是可序列化的。
@@ -805,6 +807,8 @@ class Text_Starcraftenv_Rule_Bot(gym.Env):
             'scripted_attack_units_ordered': self.transaction.get('scripted_attack_units_ordered', 0),
             'replay_path': self.transaction.get('replay_path'),
             'sc2_game_version': self.transaction.get('sc2_game_version'),
+            'scouts_out': self.transaction.get('scouts_out'),
+            'chrono_ready': self.transaction.get('chrono_ready'),
         }
 
         # 确保每个状态的部分都是可序列化的。

@@ -289,16 +289,18 @@ def test_client_against_mock_server(reject_tools, expected_tier):
 # capacity masking (mirrors the bot's handlers)
 # ---------------------------------------------------------------------------
 
-def masked(raw):
-    return legal_actions(parse_state(raw))
+def masked(raw, rules="dynamic"):
+    return legal_actions(parse_state(raw), rules)
 
 
 def test_probe_and_chrono_follow_nexus_activity():
     busy = raw_obs(supply=(12, 15))
     busy["planning"] = str({"planning_structure": {}, "planning_unit": {"planning_probe_count": 1}})
     m = masked(busy)
-    assert m[0] is None                                    # not masked: the slot runs after the probe finishes
+    assert m[0] is None                                    # bot v2 queues one probe behind the current one
     assert m[66] is None                                   # chrono is useful exactly now
+    busy["planning"] = str({"planning_structure": {}, "planning_unit": {"planning_probe_count": 2}})
+    assert masked(busy)[0] == "every nexus already has a probe queued"
     m = masked(raw_obs(supply=(12, 15)))
     assert m[0] is None and m[66] == "nexus is idle"
     assert masked(raw_obs(supply=(15, 15)))[0] == "no free supply"
@@ -310,10 +312,20 @@ def test_probe_and_chrono_follow_nexus_activity():
     (100, (12, 15), 3, False),    # 3 pylons pending > 2
     (500, (10, 15), 0, True),     # 08:20: threshold rises to 7 free supply
 ])
-def test_pylon_follows_bot_thresholds(t, supply, pending, legal):
+def test_pylon_follows_legacy_thresholds(t, supply, pending, legal):
     raw = raw_obs(t=t, supply=supply)
     raw["planning"] = str({"planning_structure": {"planning_pylon_count": pending}, "planning_unit": {}})
-    assert (masked(raw)[19] is None) == legal
+    assert (masked(raw, "legacy")[19] is None) == legal
+
+
+def test_dynamic_pylon_scales_with_production():
+    # 1 nexus + 3 gateways + 1 robo: needs 2 + 2 + 6 + 4 = 14 free supply per cycle.
+    b = {"pylon_count": 2, "gateway_count": 3, "cybernetics_core_count": 1, "robotics_facility_count": 1}
+    assert masked(raw_obs(supply=(30, 40), buildings=b))[19] is None            # 10 free < 14
+    assert "sufficient" in masked(raw_obs(supply=(30, 46), buildings=b))[19]    # 16 free
+    pending = raw_obs(supply=(30, 40), buildings=b)
+    pending["planning"] = str({"planning_structure": {"planning_pylon_count": 1}, "planning_unit": {}})
+    assert "sufficient" in masked(pending)[19]                                  # 10 + 8 under way
 
 
 def test_research_one_at_a_time_per_building():
@@ -329,16 +341,19 @@ def test_gateway_units_after_warpgate():
     raw = raw_obs(buildings={"pylon_count": 1, "warp_gate_count": 2, "cybernetics_core_count": 1},
                   research={"cybernetics_core": {"warpgate_research_status": 1}}, supply=(20, 30))
     m = masked(raw)
-    assert m[3] is None and m[1] is None                    # stalker / zealot can be warped
-    assert "only warp in" in m[2] and "only warp in" in m[4]  # adept / sentry cannot
+    assert m[3] is None and m[1] is None and m[2] is None and m[4] is None   # bot v2 warps all of them
+    # warp gate research done but the gateways have not transformed yet
+    raw["building"] = raw["building"].replace("'warp_gate_count': 2", "'warp_gate_count': 0, 'gateway_count': 2")
+    assert masked(raw)[3] == "no warp gate yet"
 
 
 def test_building_limits_and_busy_production():
     raw = raw_obs(t=100, buildings={"pylon_count": 2, "gateway_count": 1, "cybernetics_core_count": 1,
                                     "robotics_facility_count": 1}, supply=(20, 30))
     raw["planning"] = str({"planning_structure": {}, "planning_unit": {"planning_immortal_count": 1}})
-    m = masked(raw)
+    m = masked(raw, "legacy")
     assert m[22] == "limit of 1 gateway until 03:00"
+    assert masked(raw)[22] is None                          # no time-window limits under dynamic rules
     assert m[14] == "every robotics facility is busy"
     assert m[17] == "needs robotics_bay"                    # prerequisite reason comes first
     assert m[59] is not None                                # masked even once a fleet beacon exists
@@ -348,4 +363,24 @@ def test_building_limits_and_busy_production():
     assert m[64] == "no army"
     small = raw_obs(supply=(20, 30))
     small["resource"] = small["resource"].replace("'army_supply': 0", "'army_supply': 6")
-    assert masked(small)[64].startswith("attack() only moves out")
+    assert masked(small, "legacy")[64].startswith("attack() only moves out")
+    assert masked(small)[64] is None                        # dynamic: the agent decides when to attack
+
+
+def test_cannon_and_battery_prerequisites_by_rules():
+    forge_only = raw_obs(buildings={"pylon_count": 1, "forge_count": 1})
+    assert masked(forge_only)[32] is None
+    assert masked(forge_only, "legacy")[32] == "needs cybernetics_core (legacy rules)"
+    core_only = raw_obs(buildings={"pylon_count": 1, "gateway_count": 1, "cybernetics_core_count": 1})
+    assert masked(core_only)[33] is None
+    assert masked(core_only, "legacy")[33] == "needs forge (legacy rules)"
+
+
+def test_scout_and_chrono_masks_use_bot_extras():
+    raw = raw_obs(supply=(12, 15))
+    raw["planning"] = str({"planning_structure": {}, "planning_unit": {"planning_probe_count": 1}})
+    m = legal_actions(parse_state(raw, {"scouts_out": 1, "chrono_ready": False}))
+    assert m[60] == "a scout is already out" and m[66] == "no Nexus has 50 energy"
+    m = legal_actions(parse_state(raw, {"scouts_out": 0, "chrono_ready": True}))
+    assert m[60] is None and m[66] is None
+    assert legal_actions(parse_state(raw, {"scouts_out": 1}), "legacy")[60] is None   # legacy uses its interval

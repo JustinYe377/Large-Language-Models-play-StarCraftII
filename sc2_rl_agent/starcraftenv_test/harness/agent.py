@@ -73,6 +73,7 @@ class HarnessAgent:
                     else f"{args.opposite_bot} {args.opposite_race}")
         self.system_prompt = build_system_prompt(self.max_actions, opponent)
 
+        self.bot_rules = getattr(args, "bot_rules", "dynamic")
         self.plan = None
         self.prev_state = None
         self._executed = Counter()        # since the last decision
@@ -131,9 +132,9 @@ class HarnessAgent:
                   sorted(self._failed.items(), key=lambda kv: -kv[1])]
         return lines + self._carry_lines
 
-    def _decide(self, raw):
-        state = parse_state(raw)
-        mask = legal_actions(state)
+    def _decide(self, raw, observation=None):
+        state = parse_state(raw, observation)
+        mask = legal_actions(state, self.bot_rules)
         legal_ids = [i for i, reason in mask.items() if reason is None]
         user = build_user_message(render_state(state), diff_states(self.prev_state, state),
                                   self._outcome_lines(), legal_ids, self.plan)
@@ -205,7 +206,7 @@ class HarnessAgent:
 
         command, command_flag = None, False
         if self.current_step % self.action_interval == 0:
-            command = self._decide(raw) or ""
+            command = self._decide(raw, observation) or ""
             command_flag = True
 
         self.current_step += 1

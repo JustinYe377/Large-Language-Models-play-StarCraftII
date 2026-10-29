@@ -61,6 +61,9 @@ class GameState:
     research_in_progress: Dict[str, float] = field(default_factory=dict)
     enemy_units: Dict[str, int] = field(default_factory=dict)
     enemy_structures: Dict[str, int] = field(default_factory=dict)
+    # From the env observation (bot v2), None when unknown.
+    scouts_out: Optional[int] = None
+    chrono_ready: Optional[bool] = None
 
     def has(self, building, n=1):
         return self.buildings.get(building, 0) >= n
@@ -77,9 +80,12 @@ class GameState:
         return None
 
 
-def parse_state(raw) -> Optional[GameState]:
+def parse_state(raw, observation=None) -> Optional[GameState]:
+    """`observation` is the full env observation; bot-v2 extras (scouts_out,
+    chrono_ready) are read from it when present."""
     if not isinstance(raw, dict):
         return None
+    extra = observation if isinstance(observation, dict) else {}
     res = _section(raw, "resource")
     planning = _section(raw, "planning")
     research = _section(raw, "research")
@@ -121,6 +127,8 @@ def parse_state(raw) -> Optional[GameState]:
         research_in_progress=in_progress,
         enemy_units=_enemy("unit"),
         enemy_structures=_enemy("structure"),
+        scouts_out=extra.get("scouts_out"),
+        chrono_ready=extra.get("chrono_ready"),
     )
 
 
