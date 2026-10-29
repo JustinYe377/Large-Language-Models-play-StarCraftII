@@ -339,6 +339,33 @@ Games go to `log/harness_log/`. Telemetry records `parse_tier` as the transport 
 
 Phase 2, not done yet, replaces the fixed cadence and padding with event-driven decisions and a queue that waits until an action's conditions are met.
 
+### Strategy skills (PvZ)
+
+The harness gives the model playbooks it can read on demand instead of hard-coded strategy. `harness/skills/pvz/` holds 8 skills:
+
+| Skill | Use when |
+|---|---|
+| `pvz-opening` | game start, before any enemy army is seen |
+| `pvz-hold-early-rush` | 6+ zerglings or any roach/baneling before 3:30 |
+| `pvz-vs-roach-ravager` | roaches/ravagers are the main army |
+| `pvz-vs-ling-bane` | mass zerglings or banelings |
+| `pvz-vs-hydra-lurker` | hydralisks, lurkers or their tech |
+| `pvz-vs-mutalisk` | mutalisks or a spire |
+| `pvz-vs-air-late` | brood lords, 6+ corruptors, vipers |
+| `pvz-late-max` | late game, mixed or unknown army |
+
+Each skill has a target army (to copy into `army_goal`), a tech path with action ids, attack/defend timing, and *bot notes*. The bot casts no spells, so the skills avoid units whose value is a spell (sentries, storms, disruptors, oracles) and rely on immortals, colossi, archons, chargelots, stalkers and the sky units.
+
+The skills load by progressive disclosure:
+1. The static system prompt holds only the skill index: name, phase, description and "use when".
+2. The model calls `load_skill(name)`, or sets the `load_skill` field in JSON modes. Typically it does this at the start and again after scouting shows the enemy army.
+3. The skill text returns as the tool result, and `submit_decision` is then forced, so a skill costs at most one extra call.
+4. The active skill stays in a second system message until it is replaced, so it is cached too.
+
+The user message tracks the scouting result as "Enemy seen this game (most at once)" and the `army_goal` progress, for example `immortal 3/6 (+1 in production)`. In attack mode, a met goal adds "GOAL MET: order MULTI-ATTACK". Building the army is left entirely to the model. Telemetry logs `skill_loaded` and `army_goal_set` events, and the summary has `skills_loaded`, `active_skill` and `army_goal_final`. Skills are only defined for PvZ so far; `--harness_skills off` disables them.
+
+The Linux build is SC2 4.10.0 (build 75689, 13 Aug 2019), which has no balance changes of its own. [Patch 4.10.1](https://liquipedia.net/starcraft2/Patch_4.10.1) (Warp Prism cost, Interceptor build time) came after it. Few sources describe the 2019 PvZ meta specifically, so the skills follow matchup principles that held throughout Legacy of the Void ([Liquipedia PvZ late game](https://liquipedia.net/starcraft2/PvZ_Guide/Late_Game), [Void Ray/Chargelot/Templar](https://liquipedia.net/starcraft2/Void_Ray/Chargelot/Templar_(vs._Zerg)), community build guides on [Spawning Tool](https://lotv.spawningtool.com/)). The unit counts are starting points to tune with telemetry, not tested optima.
+
 ## Protoss bot v2 and `--bot_rules`
 
 The Protoss bot (`env/bot/Protoss_bot.py`) executes the agent's actions, and both agents share it. Version `v2` fixes handler bugs that made the agent's feedback wrong. Every run records `bot_version` and `bot_rules`, so wandb can keep v1 and v2 games apart.
