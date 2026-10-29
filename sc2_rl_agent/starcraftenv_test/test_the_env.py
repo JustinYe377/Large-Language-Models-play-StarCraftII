@@ -17,6 +17,8 @@ from sc2_rl_agent.starcraftenv_test.agent.real_time_agent import RealTimeAgent
 from sc2_rl_agent.starcraftenv_test.agent.llama2_agent import Llama2_Agent as Llama2Agent
 from sc2_rl_agent.starcraftenv_test.prompt.prompt import *
 from sc2_rl_agent.starcraftenv_test.telemetry.cli import add_telemetry_args
+from sc2_rl_agent.starcraftenv_test.harness.agent import HarnessAgent
+from sc2_rl_agent.starcraftenv_test.harness.cli import add_harness_args
 
 """
 地图池
@@ -78,6 +80,18 @@ def initialize_and_test_agent(args):
                             system_prompt, example_prompt, args.LLM_temperature,
                             args, action_description)
         agent_test(agent, env)
+    elif args.agent_type in ('harness', 'deepseek_harness'):
+        # Phase-1 harness: structured decisions, compact prompt, action masking.
+        agent = HarnessAgent(args.LLM_model_name, args.LLM_api_key, args.LLM_api_base,
+                             args.LLM_temperature, args, action_description)
+        result, final_observation = "crash", None
+        try:
+            result, final_observation = agent_test(agent, env)
+        except KeyboardInterrupt:
+            result = "aborted"
+            raise
+        finally:
+            agent.telemetry.finish(result, final_observation)
     elif args.agent_type in ('gpt', 'chatgpt', 'deepseek'):
         # All three aliases route to ChatGPTAgent. DeepSeek is OpenAI-compatible,
         # so the same agent class works as long as --LLM_api_base points at it.
@@ -179,7 +193,8 @@ if __name__ == '__main__':
     parser.add_argument('--current_time', type=str, default=datetime.now().strftime('%Y%m%d_%H%M%S'),
                         help='Current time. Default is current system time.')
     parser.add_argument('--agent_type', type=str, default="gpt",
-                        help='Agent type. Use "random","gpt","chatgpt","deepseek","llama2","glm2"')
+                        help='Agent type. Use "random","gpt","chatgpt","deepseek","harness","deepseek_harness",'
+                             '"llama2","glm2". harness = structured-output agent (see README "Harness").')
 
     parser.add_argument('--LLM_model_name', type=str, default="deepseek-v4-flash",
                         help="e.g. deepseek-v4-flash, deepseek-chat, gpt-3.5-turbo-16k")
@@ -199,6 +214,7 @@ if __name__ == '__main__':
 
     add_telemetry_args(parser)
     add_sc2_runtime_args(parser)
+    add_harness_args(parser)
     add_game_run_args(parser)
 
     # Commander strategy: 'macro' (default) or 'rush' (4-Gate Stalker all-in).

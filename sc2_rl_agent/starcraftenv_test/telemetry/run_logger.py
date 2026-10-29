@@ -475,6 +475,8 @@ class RunLogger:
             "wall_clock_share_waiting_llm": (llm_wait / wall) if wall > 0 else None,
             "model_requested": self.config.get("model_requested"),
             "model_resolved": self.model_resolved,
+            "sc2_version": self.config.get("sc2_version"),
+            "sc2_platform": self.config.get("sc2_platform"),
             "time_to_first_attack_s": self.time_to_first_attack_s,
             **self.scripted_attack,
             "scripted_attack_first_order_s": self.scripted_attack_first_order_s,

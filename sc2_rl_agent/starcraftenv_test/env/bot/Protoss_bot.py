@@ -2163,7 +2163,8 @@ def protoss_agent_vs_build_in(transaction, lock, map_name, isReadyForNextStep, g
     # 根据agent_type决定保存路径
     # Same folder name as the agent's logs (see agent_log_dir_name), so the
     # replay lands in the agent's game_<time>_<pid>/ folder.
-    if args.agent_type in ["random", "llama2_7b", "gemini", "chatgpt", "gpt", "deepseek", "gpt4", "glm3",
+    if args.agent_type in ["random", "llama2_7b", "gemini", "chatgpt", "gpt", "deepseek", "harness",
+                           "deepseek_harness", "gpt4", "glm3",
                            "prompt1", "qwen", "glm-4", "APU", "claude2", "qwen_7b"]:
         base_dir = os.path.join(current_dir, '..', '..', 'log', agent_log_dir_name(args.agent_type))
     else:
@@ -2206,7 +2207,8 @@ def protoss_agent_vs_rule(transaction, lock, map_name, isReadyForNextStep, game_
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 根据agent_type决定保存路径
-    if args.agent_type in ["random", "llama2", "gemini", "chatgpt", "gpt", "deepseek", "gpt4", "glm3",
+    if args.agent_type in ["random", "llama2", "gemini", "chatgpt", "gpt", "deepseek", "harness",
+                           "deepseek_harness", "gpt4", "glm3",
                            "prompt1", "qwen"]:
         base_dir = os.path.join(current_dir, '..', '..', 'log', agent_log_dir_name(args.agent_type))
     else:

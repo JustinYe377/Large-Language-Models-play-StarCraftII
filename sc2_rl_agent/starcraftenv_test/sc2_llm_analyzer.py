@@ -42,7 +42,8 @@ except ImportError:  # run as a plain script from this directory
 
 SCRIPT_DIR   = Path(__file__).parent.resolve()
 # ChatGPTAgent writes to chatgpt_log (agent_type gpt/chatgpt) or deepseek_log.
-LOG_ROOTS    = [SCRIPT_DIR / "log" / "chatgpt_log", SCRIPT_DIR / "log" / "deepseek_log"]
+LOG_ROOTS    = [SCRIPT_DIR / "log" / "chatgpt_log", SCRIPT_DIR / "log" / "deepseek_log",
+                SCRIPT_DIR / "log" / "harness_log"]
 ANALYZER_OUT = SCRIPT_DIR / "log" / "analyzer"
 
 TARGET_STEMS = [

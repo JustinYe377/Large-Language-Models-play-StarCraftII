@@ -57,4 +57,6 @@ def agent_log_dir_name(agent_type):
         return "deepseek_log"
     if agent_type in ("gpt", "chatgpt", None):
         return "chatgpt_log"
+    if agent_type in ("harness", "deepseek_harness"):
+        return "harness_log"
     return f"{agent_type}_log"

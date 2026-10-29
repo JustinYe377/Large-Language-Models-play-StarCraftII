@@ -80,7 +80,8 @@ class AgentTelemetry:
             meter = LLMMeter(sink=logger.log_llm_call, on_complete=logger.log_llm_call_complete,
                              model_requested=agent.model_name,
                              reasoning_effort=getattr(args, "LLM_reasoning_effort", None))
-            agent.L2.chatbot.meter = meter
+            chatbot = getattr(agent, "llm_client", None) or agent.L2.chatbot
+            chatbot.meter = meter
             k = getattr(args, "prompt_K", None)
             return cls(logger, meter, int(k) if k is not None else 5,
                        agent.empty_action_idx, agent._id_to_name)
@@ -122,7 +123,7 @@ class AgentTelemetry:
         self.meter.set_context(self.step, self.game_time_s, purpose)
 
     @_safe()
-    def on_tick(self, command, parse_tier, proposed_ids, kept_ids, slots):
+    def on_tick(self, command, parse_tier, proposed_ids, kept_ids, slots, n_illegal=0):
         """Returns the tick_id to attach to this tick's queue slots."""
         completed = self.meter.pop_completed()
         tick_id = self.next_tick_id
@@ -139,6 +140,7 @@ class AgentTelemetry:
             slots=slots,
             empty_idx=self.empty_idx,
             llm_error=any(c["failed"] for c in completed),
+            n_illegal=n_illegal,
             command_preview=_command_text(command)[:COMMAND_PREVIEW_CHARS],
         )
         self.logger.log_tick(tick)

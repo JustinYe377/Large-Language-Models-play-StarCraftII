@@ -21,8 +21,12 @@ SCHEMA_VERSION = 1
 #   queue_empty - EMPTY returned because the action queue was empty
 SLOT_SOURCES = ("llm", "padding", "filter_drop", "parse_empty", "queue_empty")
 
-# Which extractor tier produced the action ids (see utils/action_extractor.py).
-PARSE_TIERS = ("structured", "id_based", "legacy", "vectordb", "none")
+# Which extractor tier produced the action ids. Regex tiers come from
+# utils/action_extractor.py (ChatGPTAgent); the structured ones from
+# harness/llm.py (HarnessAgent): the transport that produced a valid decision,
+# or "repair" after one corrective retry.
+PARSE_TIERS = ("structured", "id_based", "legacy", "vectordb",
+               "tools", "json_schema", "json_object", "json_text", "repair", "none")
 
 # SC2 "faster" speed: 22.4 game loops per in-game second.
 GAME_LOOPS_PER_SECOND = 22.4
@@ -90,6 +94,7 @@ class DecisionTick:
     n_parse_empty_slots: int = 0
     n_nonreal_slots: int = 0
     n_truncated: int = 0
+    n_illegal_dropped: int = 0          # parsed but masked as not legal (harness)
     action_window: int = 0
     llm_error: bool = False
     slot_sources: List[str] = field(default_factory=list)

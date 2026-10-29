@@ -72,15 +72,16 @@ def source_labels(proposed_ids, kept_ids, parse_tier, empty_idx):
 
 
 def build_tick(tick_id, call_id, game_step, game_time_s, k_requested, parse_tier,
-               proposed_ids, kept_ids, slots, empty_idx, llm_error=False, command_preview=""):
+               proposed_ids, kept_ids, slots, empty_idx, llm_error=False, command_preview="", n_illegal=0):
     """Summarize one decision tick. `slots` is the (action_id, source) list
-    produced by mix_with_sources."""
+    produced by mix_with_sources. With action masking, `proposed_ids` are the
+    legal proposals and `n_illegal` counts the parsed ids that were masked."""
     proposed_ids = list(proposed_ids)
-    n_parsed = 0 if parse_tier == "none" else len(proposed_ids)
+    n_parsed = 0 if parse_tier == "none" else len(proposed_ids) + n_illegal
     n_filter_dropped = 0
     if n_parsed:
         n_filter_dropped = sum(1 for p, k in zip(proposed_ids, kept_ids) if k == empty_idx and p != empty_idx)
-    n_after_filter = n_parsed - n_filter_dropped
+    n_after_filter = n_parsed - n_illegal - n_filter_dropped
     queued_real = [aid for aid, src in slots if src == "llm"]
     n_queued_real = len(queued_real)
     by_source = Counter(src for _, src in slots)
@@ -103,6 +104,7 @@ def build_tick(tick_id, call_id, game_step, game_time_s, k_requested, parse_tier
         n_parse_empty_slots=by_source["parse_empty"],
         n_nonreal_slots=len(slots) - n_queued_real,
         n_truncated=n_after_filter - n_queued_real,
+        n_illegal_dropped=n_illegal if parse_tier != "none" else 0,
         action_window=len(slots),
         llm_error=llm_error,
         slot_sources=[src for _, src in slots],

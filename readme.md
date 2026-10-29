@@ -310,6 +310,35 @@ AI_BUILD_LEVELS = ['randombuild', 'rush', 'timing', 'power', 'macro', 'air']
 
 ---
 
+## Harness (structured-output agent)
+
+`--agent_type deepseek_harness` (or `harness`) runs `harness/agent.py::HarnessAgent`, a rewrite of the LLM interface. `ChatGPTAgent` (`--agent_type deepseek`) stays unchanged as the baseline, so both can be compared in wandb by agent type. Phase 1 keeps the old decision cadence on purpose: a decision every 10 steps, `mix_actions` padding, and the resource filter. Only these three things change:
+
+| | Baseline (`deepseek`) | Harness (`deepseek_harness`) |
+|---|---|---|
+| Output | an 8-section essay with the actions at the end, parsed by regex tiers | one schema-validated decision `{"plan", "actions": [{"id", "why"}]}` |
+| Transport | free text | forced tool call; falls back to JSON Schema, JSON mode, then text, choosing the strongest mode the server accepts and remembering it |
+| Invalid output | regex guesses, else EMPTY | one corrective retry that includes the validator's error, else EMPTY (`parse_tier=none`) |
+| Hidden reasoning | server default (DeepSeek: on, ~5k tokens per decision) | off by default (`--LLM_thinking disabled`) |
+| Input | five near-identical L1 summaries + raw executed/failed lists | one state snapshot, changes since the last decision, deduplicated outcomes with failure reasons, and the model's own `plan` from last turn |
+| Prompt layout | | static system prompt (rules + full action catalog with costs and prerequisites) first and identical every call, so it is served from the prefix cache; everything dynamic goes in the user message |
+| Action masking | none | only actions whose prerequisites exist are listed as legal; others are discarded (`n_illegal_dropped`) and reported back to the model next turn |
+
+The tool schema itself never changes during a game: it only bounds ids to the action vocabulary. The per-turn legal set travels in the user message, so the cached prefix, which includes the tool definition, is never invalidated.
+
+Flags (`harness/cli.py`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--LLM_thinking` | `disabled` | `enabled` / `disabled` / `auto` (send nothing) |
+| `--LLM_thinking_provider` | `auto` | `deepseek` sends `thinking: {type}`; `chat_template` sends `chat_template_kwargs.enable_thinking` (vLLM/SGLang with Qwen3-style models). `auto` picks by `--LLM_api_base`. |
+| `--structured_mode` | `auto` | force `tools`, `json_schema`, `json_object` or `text` |
+| `--harness_max_actions` | `5` | K, the maximum actions per decision |
+
+Games go to `log/harness_log/`. Telemetry records `parse_tier` as the transport that produced the decision (`tools`, `json_schema`, `json_object`, `json_text`, `repair`, `none`). Each decision tick also stores `n_illegal_dropped`. The legacy files (`commander.json`, `combined_input.json`, …) are still written, so `sc2_llm_analyzer.py` works on harness games; `combined_input.json` also stores the exact user message sent.
+
+Phase 2, not done yet, replaces the fixed cadence and padding with event-driven decisions and a queue that waits until an action's conditions are met.
+
 ## Telemetry
 
 Every game run with `--agent_type gpt|chatgpt|deepseek`, from `test_the_env.py` or `multiprocess_test.py`, is recorded for comparing experiments. This is measurement only: prompts, decision frequency, the extractor, the resource filter and `mix_actions` are unchanged.
