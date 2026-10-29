@@ -25,6 +25,20 @@ def _section(raw, key):
     return {}
 
 
+# Visible-but-meaningless enemy "units" for strategy purposes.
+ENEMY_NOISE = {"larva", "egg", "broodling", "changeling", "changelingzealot", "changelingmarine",
+               "changelingzergling", "overlordcocoon", "locustmp", "locustmpflying"}
+
+
+def _enemy_name(key):
+    """'enemy_UnitTypeId.ZERGLING' -> 'zergling'."""
+    name = str(key).lower()
+    for prefix in ("enemy_unittypeid.", "enemy_", "unittypeid."):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return name
+
+
 def _count_key(key, prefix=""):
     """'planning_Zealot_count' -> 'zealot'; 'statgate_count' -> 'stargate'."""
     name = key.lower()
@@ -106,7 +120,14 @@ def parse_state(raw, observation=None) -> Optional[GameState]:
 
     def _enemy(section):
         d = enemy.get(section, {}) if isinstance(enemy, dict) else {}
-        return {str(k).lower(): int(v) for k, v in d.items() if isinstance(v, (int, float))} if isinstance(d, dict) else {}
+        if not isinstance(d, dict):
+            return {}
+        out = {}
+        for k, v in d.items():
+            name = _enemy_name(k)
+            if name and isinstance(v, (int, float)) and name not in ENEMY_NOISE:
+                out[name] = out.get(name, 0) + int(v)
+        return out
 
     return GameState(
         game_time=str(res.get("game_time", "00:00")),

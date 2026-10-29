@@ -72,12 +72,23 @@ def make_handler(action_ids, k, model, fail_rate, rng, illegal_rate=0.0, reject_
             prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
             prompt_tokens = max(1, prompt_chars // 4)
             decision = json.dumps({"plan": "mock plan: macro up",
+                                   "army_goal": {"mode": "attack", "units": [{"unit": "zealot", "count": 6}],
+                                                 "attack_at_supply": 60},
                                    "actions": [{"id": a, "why": "mock"} for a in picks]})
             if request.get("tools"):
-                name = request["tools"][0]["function"]["name"]
+                tools = {t["function"]["name"]: t["function"] for t in request["tools"]}
+                choice = request.get("tool_choice")
+                forced = choice.get("function", {}).get("name") if isinstance(choice, dict) else None
+                user = str(messages[-1].get("content", "")) if messages else ""
+                if forced is None and "load_skill" in tools and "## Active skill\n(none loaded)" in user:
+                    skills = tools["load_skill"]["parameters"]["properties"]["name"]["enum"]
+                    name, arguments = "load_skill", json.dumps({"name": skills[0]})
+                else:
+                    name = forced or next(n for n in tools if n != "load_skill")
+                    arguments = decision
                 message = {"role": "assistant", "content": None, "tool_calls": [{
                     "id": f"call_{time.time_ns()}", "type": "function",
-                    "function": {"name": name, "arguments": decision}}]}
+                    "function": {"name": name, "arguments": arguments}}]}
                 finish = "tool_calls"
             elif request.get("response_format"):
                 message, finish = {"role": "assistant", "content": decision}, "stop"

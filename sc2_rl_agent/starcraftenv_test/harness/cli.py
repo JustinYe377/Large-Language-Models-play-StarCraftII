@@ -13,4 +13,7 @@ def add_harness_args(parser):
                         help='How decisions are constrained. auto: strongest the server accepts.')
     parser.add_argument('--harness_max_actions', type=int, default=5,
                         help='Maximum actions per decision (K).')
+    parser.add_argument('--harness_skills', type=str, default='on', choices=['on', 'off'],
+                        help='Strategy skills for the matchup (harness/skills/<matchup>/), loaded by the '
+                             'model on demand. off: no skill index or load_skill tool.')
     return parser

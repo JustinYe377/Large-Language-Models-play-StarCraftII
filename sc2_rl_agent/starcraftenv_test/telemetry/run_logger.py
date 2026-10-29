@@ -155,6 +155,7 @@ class RunLogger:
         self.replay_path = None
         self._last_game_log_t = None
         self._last_game_time_s = 0.0
+        self.summary_extra = {}          # agent-provided fields merged into the summary
 
         self.config = self._build_config(extra_config or {})
         self.run_name = self._run_name()
@@ -496,6 +497,7 @@ class RunLogger:
             s[f"fail_cat_{cat.replace(' ', '_')}"] = n
         for name, n in self.action_counts.items():
             s[f"action_count_{name.replace(' ', '_')}"] = n
+        s.update(_jsonable(self.summary_extra))
         s.update(_jsonable(extra or {}))
         return s
 

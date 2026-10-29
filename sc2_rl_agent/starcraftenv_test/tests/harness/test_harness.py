@@ -131,13 +131,22 @@ def test_thinking_switch_per_provider():
 # StructuredClient with a fake transport
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def no_backoff(monkeypatch):
+    from sc2_rl_agent.starcraftenv_test.harness import llm
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+
+
 class BadRequest(Exception):
     status_code = 400
 
 
-def tool_response(args, model="m"):
-    msg = types.SimpleNamespace(content=None, tool_calls=[types.SimpleNamespace(
-        function=types.SimpleNamespace(arguments=json.dumps(args) if not isinstance(args, str) else args))])
+def tool_response(args, model="m", name="submit_decision", extra_calls=()):
+    def call(n, a, i):
+        return types.SimpleNamespace(id=f"call_{i}", function=types.SimpleNamespace(
+            name=n, arguments=json.dumps(a) if not isinstance(a, str) else a))
+    calls = [call(n, a, i + 1) for i, (n, a) in enumerate(extra_calls)] + [call(name, args, 0)]
+    msg = types.SimpleNamespace(content=None, tool_calls=calls)
     usage = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20, completion_tokens_details=None)
     return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason="tool_calls")],
                                  usage=usage, model=model)
@@ -170,7 +179,7 @@ def make_client(outcomes, mode="auto", base_url="https://api.deepseek.com/v1"):
 
 def test_tools_mode_request_shape_and_cache_stable_schema():
     c, t = make_client([tool_response({"plan": "p", "actions": [{"id": 0, "why": "w"}]})])
-    d, tier, payload, problems = c.decide([{"role": "user", "content": "x"}])
+    d, tier, payload, problems, _ = c.decide([{"role": "user", "content": "x"}])
     assert tier == "tools" and d.action_ids == [0]
     req = t.requests[0]
     assert req["tool_choice"]["function"]["name"] == "submit_decision"
@@ -182,7 +191,7 @@ def test_downgrade_when_server_rejects_mode(monkeypatch):
     c, t = make_client([BadRequest("Error 400: tool use is not supported"),
                         BadRequest("400 This response_format type is unavailable now"),
                         content_response('{"plan": "p", "actions": [{"id": 19, "why": "w"}]}')])
-    d, tier, _, _ = c.decide([{"role": "user", "content": "x"}])
+    d, tier, _, _, _ = c.decide([{"role": "user", "content": "x"}])
     assert tier == "json_object" and d.action_ids == [19]
     assert c.mode == "json_object"                        # remembered for later calls
     assert t.requests[2]["response_format"] == {"type": "json_object"}
@@ -191,14 +200,14 @@ def test_downgrade_when_server_rejects_mode(monkeypatch):
 def test_repair_retry_then_success():
     c, t = make_client([tool_response("not json at all"),
                         tool_response({"plan": "p", "actions": [{"id": 22, "why": "w"}]})])
-    d, tier, _, problems = c.decide([{"role": "user", "content": "x"}])
+    d, tier, _, problems, _ = c.decide([{"role": "user", "content": "x"}])
     assert tier == "repair" and d.action_ids == [22]
     assert "not a valid decision" in t.requests[1]["messages"][-1]["content"]
 
 
 def test_empty_action_list_is_a_valid_wait():
     c, _ = make_client([tool_response({"plan": "save for nexus", "actions": []})])
-    d, tier, _, problems = c.decide([{"role": "user", "content": "x"}])
+    d, tier, _, problems, _ = c.decide([{"role": "user", "content": "x"}])
     assert d is not None and d.actions == [] and tier == "tools" and problems == []
 
 
@@ -206,7 +215,7 @@ def test_transport_failure_returns_none(monkeypatch):
     from sc2_rl_agent.starcraftenv_test.harness import llm
     monkeypatch.setattr(llm.time, "sleep", lambda s: None)
     c, _ = make_client([RuntimeError("down")] * 5)
-    d, tier, payload, problems = c.decide([{"role": "user", "content": "x"}])
+    d, tier, payload, problems, _ = c.decide([{"role": "user", "content": "x"}])
     assert d is None and tier == "none"
 
 
@@ -279,7 +288,7 @@ def test_client_against_mock_server(reject_tools, expected_tier):
     try:
         c = StructuredClient("mock", "x", url, 0.3, 5, N_IDS)
         user = build_user_message("state", [], [], [0, 19, 22], None)
-        d, tier, _, problems = c.decide([{"role": "user", "content": user}])
+        d, tier, _, problems, _ = c.decide([{"role": "user", "content": user}])
         assert tier == expected_tier and set(d.action_ids) <= {0, 19, 22} and d.plan
     finally:
         srv.shutdown()
@@ -384,3 +393,100 @@ def test_scout_and_chrono_masks_use_bot_extras():
     m = legal_actions(parse_state(raw, {"scouts_out": 0, "chrono_ready": True}))
     assert m[60] is None and m[66] is None
     assert legal_actions(parse_state(raw, {"scouts_out": 1}), "legacy")[60] is None   # legacy uses its interval
+
+
+
+# ---------------------------------------------------------------------------
+# strategy skills, army goal, tool loop
+# ---------------------------------------------------------------------------
+
+from sc2_rl_agent.starcraftenv_test.harness.skills import SkillLibrary
+from sc2_rl_agent.starcraftenv_test.harness.prompt import goal_progress_lines
+
+
+def test_pvz_skill_library_loads():
+    lib = SkillLibrary.for_opponent("Zerg")
+    assert {"pvz-opening", "pvz-hold-early-rush", "pvz-vs-roach-ravager", "pvz-vs-ling-bane",
+            "pvz-vs-hydra-lurker", "pvz-vs-mutalisk", "pvz-vs-air-late", "pvz-late-max"} <= set(lib.names)
+    assert all(sk.description and sk.use_when and sk.body for sk in lib.skills.values())
+    assert "pvz-vs-roach-ravager [mid" in lib.index_text()
+    assert not SkillLibrary.for_opponent("Terran")           # only PvZ so far
+
+
+def test_skill_tool_round_then_forced_submit():
+    lib = SkillLibrary.for_opponent("Zerg")
+    t = FakeTransport([
+        tool_response({"name": "pvz-vs-roach-ravager"}, name="load_skill"),
+        tool_response({"plan": "immortals", "army_goal": {"mode": "attack", "units": [{"unit": "immortal", "count": 6}],
+                                                          "attack_at_supply": 120},
+                       "actions": [{"id": 26, "why": "robo"}]}),
+    ])
+    c = StructuredClient("m", "k", "https://api.deepseek.com/v1", 0.3, 5, N_IDS, client=t, skills=lib)
+    d, tier, _, problems, loaded = c.decide([{"role": "user", "content": "x"}])
+    assert loaded == ["pvz-vs-roach-ravager"] and d.action_ids == [26]
+    assert d.army_goal == {"mode": "attack", "units": {"immortal": 6}, "attack_at_supply": 120}
+    first, second = t.requests
+    assert first["tool_choice"] == "required" and [x["function"]["name"] for x in first["tools"]] == \
+        ["submit_decision", "load_skill"]
+    assert second["tools"] == first["tools"]                 # identical tool list keeps the cache
+    assert second["tool_choice"]["function"]["name"] == "submit_decision"
+    tool_msg = second["messages"][-1]
+    assert tool_msg["role"] == "tool" and "Immortals deal bonus damage" in tool_msg["content"]
+
+
+def test_skill_and_decision_in_one_reply():
+    lib = SkillLibrary.for_opponent("Zerg")
+    t = FakeTransport([tool_response({"plan": "p", "army_goal": {"mode": "keep", "units": [], "attack_at_supply": 0},
+                                      "actions": [{"id": 0, "why": "w"}]},
+                                     extra_calls=[("load_skill", {"name": "pvz-opening"})])])
+    c = StructuredClient("m", "k", "https://api.deepseek.com/v1", 0.3, 5, N_IDS, client=t, skills=lib)
+    d, tier, _, _, loaded = c.decide([{"role": "user", "content": "x"}])
+    assert loaded == ["pvz-opening"] and d.action_ids == [0] and d.army_goal is None and len(t.requests) == 1
+
+
+def test_json_mode_load_skill_field():
+    lib = SkillLibrary.for_opponent("Zerg")
+    t = FakeTransport([content_response('{"plan": "", "army_goal": {"mode": "keep", "units": [], "attack_at_supply": 0},'
+                                        ' "actions": [], "load_skill": "pvz-vs-mutalisk"}'),
+                       content_response('{"plan": "phoenix", "army_goal": {"mode": "defend", "units": [{"unit": "phoenix",'
+                                        ' "count": 6}], "attack_at_supply": 0}, "actions": [{"id": 27, "why": "sg"}],'
+                                        ' "load_skill": ""}')])
+    c = StructuredClient("m", "k", "http://gpu:8000/v1", 0.3, 5, N_IDS, mode="json_object", client=t, skills=lib)
+    d, tier, _, _, loaded = c.decide([{"role": "user", "content": "x"}])
+    assert loaded == ["pvz-vs-mutalisk"] and d.action_ids == [27] and tier == "json_object"
+    assert "Phoenixes are faster" in t.requests[1]["messages"][-1]["content"]
+
+
+def test_goal_progress_lines():
+    goal = {"mode": "attack", "units": {"immortal": 2, "stalker": 4}, "attack_at_supply": 60}
+    lines = goal_progress_lines(goal, {"immortal": 2, "stalker": 3}, {"stalker": 1}, 58)
+    assert lines[0] == "mode attack: immortal 2/2, stalker 3/4 (+1 in production)"
+    assert "GOAL MET" not in " ".join(lines)
+    assert goal_progress_lines(goal, {"immortal": 2, "stalker": 4}, {}, 61)[-1].startswith("GOAL MET")
+    assert goal_progress_lines(None, {}, {}, 0) == ["(none set)"]
+
+
+def test_agent_keeps_active_skill_goal_and_enemy_memory(tmp_path):
+    goal = {"mode": "attack", "units": [{"unit": "zealot", "count": 8}], "attack_at_supply": 40}
+    agent = make_agent(tmp_path, [
+        tool_response({"name": "pvz-vs-ling-bane"}, name="load_skill"),
+        tool_response({"plan": "chargelots", "army_goal": goal, "actions": [{"id": 0, "why": "eco"}]}),
+        tool_response({"plan": "", "army_goal": {"mode": "keep", "units": [], "attack_at_supply": 0},
+                       "actions": [{"id": 0, "why": "eco"}]}),
+    ])
+    raw = raw_obs(t=30, minerals=200, supply=(12, 14))
+    raw["enemy"] = str({"unit": {"enemy_UnitTypeId.ZERGLING": 8}, "structure": {}})
+    for step in range(11):
+        r = raw if step == 0 else raw_obs(t=30 + step, minerals=200, supply=(12, 14))
+        agent.action(obs(r))
+    assert agent.active_skill == "pvz-vs-ling-bane"
+    assert agent.army_goal == {"mode": "attack", "units": {"zealot": 8}, "attack_at_supply": 40}
+    second = agent.llm_client.client.requests[-1]
+    assert second["messages"][1]["content"].startswith("Active strategy skill: pvz-vs-ling-bane")
+    user = second["messages"][-1]["content"]
+    assert "zergling 8" in user and "zealot 0/8" in user      # enemy memory survives the scout leaving
+    events = [json.loads(l) for l in open(f"{agent.game_folder}/events.jsonl")]
+    assert [e["type"] for e in events if e["type"] in ("skill_loaded", "army_goal_set")] == \
+        ["skill_loaded", "army_goal_set"]
+    s = agent.telemetry.finish("aborted")
+    assert s["skills_loaded"] == ["pvz-vs-ling-bane"] and s["active_skill"] == "pvz-vs-ling-bane"
